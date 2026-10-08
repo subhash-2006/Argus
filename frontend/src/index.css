@@ -15,10 +15,12 @@
   --severity-high-bg: rgba(255, 159, 28, 0.15);
   --severity-medium: #ffe600;
   --severity-medium-bg: rgba(255, 230, 0, 0.12);
-  --severity-low: #05ffa1;
-  --severity-low-bg: rgba(5, 255, 161, 0.12);
-  --severity-info: #00b4d8;
-  --severity-info-bg: rgba(0, 180, 216, 0.12);
+  --severity-low: #00b4d8;
+  --severity-low-bg: rgba(0, 180, 216, 0.15);
+  --severity-info: #05ffa1;
+  --severity-info-bg: rgba(5, 255, 161, 0.15);
+  --severity-normal: #05ffa1;
+  --severity-normal-bg: rgba(5, 255, 161, 0.15);
 
   --text-main: #f0f4f8;
   --text-muted: #8a99ad;
@@ -158,13 +160,13 @@ body {
 .badge-low {
   background: var(--severity-low-bg);
   color: var(--severity-low);
-  border: 1px solid rgba(5, 255, 161, 0.4);
+  border: 1px solid rgba(0, 180, 216, 0.4);
 }
 
-.badge-info {
+.badge-info, .badge-normal {
   background: var(--severity-info-bg);
   color: var(--severity-info);
-  border: 1px solid rgba(0, 180, 216, 0.4);
+  border: 1px solid rgba(5, 255, 161, 0.4);
 }
 
 /* Custom Buttons */
@@ -231,3 +233,35 @@ body {
 .new-row {
   animation: slideIn 0.3s ease-out forwards;
 }
+
+/* Skeleton Loading Animation */
+@keyframes pulseSkeleton {
+  0% { opacity: 0.3; }
+  50% { opacity: 0.7; }
+  100% { opacity: 0.3; }
+}
+
+.skeleton-box {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  animation: pulseSkeleton 1.5s ease-in-out infinite;
+}
+
+/* Responsive styles */
+@media (max-width: 1200px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 768px) {
+  header {
+    flex-direction: column;
+    align-items: flex-start !important;
+  }
+  .header-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+}
+

@@ -38,6 +38,85 @@ const dedupeEvents = (list) => {
   return Array.from(map.values());
 };
 
+// Count-up animation hook for metric cards
+function useAnimatedCount(targetValue, duration = 400) {
+  const [displayValue, setDisplayValue] = useState(targetValue);
+  const prevValueRef = useRef(targetValue);
+
+  useEffect(() => {
+    const numTarget = typeof targetValue === 'number' ? targetValue : parseFloat(targetValue) || 0;
+    const numStart = typeof prevValueRef.current === 'number' ? prevValueRef.current : parseFloat(prevValueRef.current) || 0;
+    
+    if (numStart === numTarget) {
+      setDisplayValue(targetValue);
+      return;
+    }
+
+    let startTime = null;
+    let animFrame;
+
+    const animate = (timestamp) => {
+      if (!startTime) startTime = timestamp;
+      const elapsed = timestamp - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const current = numStart + (numTarget - numStart) * progress;
+      
+      if (typeof targetValue === 'number' && Number.isInteger(targetValue)) {
+        setDisplayValue(Math.round(current));
+      } else {
+        setDisplayValue(current.toFixed(2));
+      }
+
+      if (progress < 1) {
+        animFrame = requestAnimationFrame(animate);
+      } else {
+        prevValueRef.current = targetValue;
+        setDisplayValue(targetValue);
+      }
+    };
+
+    animFrame = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animFrame);
+  }, [targetValue, duration]);
+
+  return displayValue;
+}
+
+const getSeverityColor = (severity, isAnomaly) => {
+  if (!isAnomaly) return '#05ffa1';
+  switch (severity) {
+    case 'CRITICAL': return '#ff2a6d';
+    case 'HIGH': return '#ff9f1c';
+    case 'MEDIUM': return '#ffe600';
+    case 'LOW': return '#00b4d8';
+    default: return '#05ffa1';
+  }
+};
+
+const getSeverityBadgeClass = (severity, isAnomaly) => {
+  if (!isAnomaly && (!severity || severity === 'NORMAL' || severity === 'INFO')) return 'badge-normal';
+  switch (severity) {
+    case 'CRITICAL': return 'badge-critical';
+    case 'HIGH': return 'badge-high';
+    case 'MEDIUM': return 'badge-medium';
+    case 'LOW': return 'badge-low';
+    default: return 'badge-normal';
+  }
+};
+
+const getClassificationLabel = (threatType, isAnomaly) => {
+  if (!isAnomaly) return 'Normal Traffic';
+  switch (threatType) {
+    case 'HONEYTOKEN_ACCESS': return 'Honeytrap Access';
+    case 'SQL_INJECTION': return 'SQL Injection';
+    case 'XSS_ATTACK': return 'Cross-Site Scripting';
+    case 'BRUTE_FORCE': return 'Brute Force';
+    case 'PATH_TRAVERSAL': return 'Path Traversal';
+    case 'ML_CLASSIFIED_ANOMALY': return 'ML: Suspicious';
+    default: return threatType ? threatType.replace(/_/g, ' ') : 'Anomaly Detected';
+  }
+};
+
 export default function App() {
   const [logs, setLogs] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -201,10 +280,16 @@ export default function App() {
   const anomalyCount = logs.filter(l => l.is_anomaly).length;
   const criticalCount = logs.filter(l => l.severity === 'CRITICAL').length;
   const honeytokenCount = logs.filter(l => l.threat_type === 'HONEYTOKEN_ACCESS').length;
-  const sqliCount = logs.filter(l => l.threat_type === 'SQL_INJECTION').length;
-  const avgEntropy = logs.length > 0
-    ? (logs.reduce((acc, l) => acc + (l.shannon_entropy || 0), 0) / logs.length).toFixed(2)
-    : '0.00';
+  const avgEntropyNum = logs.length > 0
+    ? (logs.reduce((acc, l) => acc + (l.shannon_entropy || 0), 0) / logs.length)
+    : 0;
+
+  // Animated metric values
+  const animTotalEvents = useAnimatedCount(totalEvents);
+  const animAnomalyCount = useAnimatedCount(anomalyCount);
+  const animCriticalCount = useAnimatedCount(criticalCount);
+  const animHoneytokenCount = useAnimatedCount(honeytokenCount);
+  const animAvgEntropy = useAnimatedCount(avgEntropyNum);
 
   // Filtered logs
   const filteredLogs = logs.filter(l => {
@@ -227,16 +312,6 @@ export default function App() {
     setTimeout(() => setCopiedSnippet(false), 2000);
   };
 
-  const getSeverityBadgeClass = (severity) => {
-    switch (severity) {
-      case 'CRITICAL': return 'badge-critical';
-      case 'HIGH': return 'badge-high';
-      case 'MEDIUM': return 'badge-medium';
-      case 'LOW': return 'badge-low';
-      default: return 'badge-info';
-    }
-  };
-
   return (
     <div style={{ padding: '24px 32px', maxWidth: '1600px', margin: '0 auto' }}>
       {/* Top Navbar */}
@@ -255,8 +330,8 @@ export default function App() {
         </div>
 
         {/* Live System Status Badges */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', background: 'rgba(255,255,255,0.03)', padding: '6px 14px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }} className="header-actions">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 12px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
             <span className={`pulse-dot ${wsConnected ? 'online' : 'warning'}`}></span>
             <span style={{ color: 'var(--text-muted)' }}>WebSocket:</span>
             <span style={{ fontWeight: 600, color: wsConnected ? '#05ffa1' : '#ff9f1c' }}>
@@ -264,44 +339,91 @@ export default function App() {
             </span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', background: 'rgba(255,255,255,0.03)', padding: '6px 14px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
-            <Database size={15} color={healthStatus.mongodb === 'connected' ? '#05ffa1' : '#ff9f1c'} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 12px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
+            <Database size={14} color={healthStatus.mongodb === 'connected' ? '#05ffa1' : '#ff9f1c'} />
             <span style={{ color: 'var(--text-muted)' }}>Mongo DB:</span>
             <span style={{ fontWeight: 600, color: healthStatus.mongodb === 'connected' ? '#05ffa1' : '#ff9f1c' }}>
               {healthStatus.mongodb}
             </span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', background: 'rgba(255,255,255,0.03)', padding: '6px 14px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
-            <Cpu size={15} color="#00f0ff" />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', background: 'rgba(255,255,255,0.03)', padding: '6px 12px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
+            <Cpu size={14} color="#00f0ff" />
             <span style={{ color: 'var(--text-muted)' }}>Gemini AI:</span>
             <span style={{ fontWeight: 600, color: '#00f0ff' }}>
-              {healthStatus.gemini === 'configured' ? 'gemini-2.5-flash Ready' : healthStatus.gemini}
+              {healthStatus.gemini === 'configured' ? 'gemini-3.8-flash Ready' : healthStatus.gemini}
             </span>
           </div>
 
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <button className="btn-primary" onClick={() => setShowManualModal(true)} style={{ fontSize: '12px', padding: '8px 14px', background: 'linear-gradient(135deg, #05ffa1 0%, #00b4d8 100%)', color: '#000' }}>
+          {/* Action Buttons & Attack Simulator Group */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            
+            {/* Labeled Attack Simulator Group */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid rgba(255, 159, 28, 0.3)',
+              borderRadius: '10px',
+              padding: '4px 8px',
+              position: 'relative'
+            }}>
+              <span style={{ fontSize: '10px', textTransform: 'uppercase', color: '#ff9f1c', fontWeight: 800, letterSpacing: '0.5px', marginRight: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Flame size={12} color="#ff9f1c" />
+                Attack Simulator:
+              </span>
+              
+              <button
+                className="btn-secondary"
+                onClick={() => triggerScenario(1)}
+                disabled={isSimulating}
+                style={{ fontSize: '11px', padding: '5px 10px', background: 'rgba(255, 159, 28, 0.1)', borderColor: 'rgba(255, 159, 28, 0.3)' }}
+                aria-label="Simulate Credential Stuffing Attack"
+              >
+                Credential Stuffing
+              </button>
+
+              <button
+                className="btn-secondary"
+                onClick={() => triggerScenario(2)}
+                disabled={isSimulating}
+                style={{ fontSize: '11px', padding: '5px 10px', background: 'rgba(0, 240, 255, 0.1)', borderColor: 'rgba(0, 240, 255, 0.3)' }}
+                aria-label="Simulate Obfuscated SQL Injection Attack"
+              >
+                Obfuscated SQLi
+              </button>
+
+              <button
+                className="btn-secondary"
+                onClick={() => triggerScenario(3)}
+                disabled={isSimulating}
+                style={{ fontSize: '11px', padding: '5px 10px', background: 'rgba(255, 42, 109, 0.1)', borderColor: 'rgba(255, 42, 109, 0.3)', color: '#ff2a6d' }}
+                aria-label="Simulate Multi-Stage APT Attack"
+              >
+                <Zap size={12} color="#ff2a6d" />
+                Multi-Stage APT
+              </button>
+            </div>
+
+            {/* Separate Primary-Styled Manual Ingest Button */}
+            <button
+              className="btn-primary"
+              onClick={() => setShowManualModal(true)}
+              style={{ fontSize: '12px', padding: '8px 14px', background: 'linear-gradient(135deg, #05ffa1 0%, #00b4d8 100%)', color: '#000', fontWeight: 700 }}
+              aria-label="Open Manual Log Ingestion Modal"
+            >
               <Plus size={15} color="#000" />
               Manual Log Ingest
             </button>
 
-            <button className="btn-secondary" onClick={() => triggerScenario(1)} disabled={isSimulating} style={{ fontSize: '12px', padding: '8px 12px' }}>
-              <Flame size={14} color="#ff9f1c" />
-              Scenario 1: Credential Stuffing
-            </button>
-
-            <button className="btn-secondary" onClick={() => triggerScenario(2)} disabled={isSimulating} style={{ fontSize: '12px', padding: '8px 12px' }}>
-              <Terminal size={14} color="#00f0ff" />
-              Scenario 2: Obfuscated SQLi
-            </button>
-
-            <button className="btn-primary" onClick={() => triggerScenario(3)} disabled={isSimulating} style={{ fontSize: '12px', padding: '8px 14px' }}>
-              <Zap size={14} />
-              Scenario 3: Multi-Stage APT
-            </button>
-
-            <button className="btn-secondary" onClick={handleClearData} style={{ fontSize: '12px', padding: '8px 12px', borderColor: 'rgba(255, 42, 109, 0.4)', color: '#ff2a6d' }}>
+            {/* Clear Data Button */}
+            <button
+              className="btn-secondary"
+              onClick={handleClearData}
+              style={{ fontSize: '12px', padding: '8px 12px', borderColor: 'rgba(255, 42, 109, 0.4)', color: '#ff2a6d' }}
+              aria-label="Clear All Incidents and Log Telemetry Data"
+            >
               <Trash2 size={14} color="#ff2a6d" />
               Clear Data
             </button>
@@ -310,14 +432,14 @@ export default function App() {
       </header>
 
       {/* Metrics Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '20px', marginBottom: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '20px', marginBottom: '24px' }}>
         <div className="glass-panel" style={{ padding: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
             <span style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 500 }}>Total Ingested Events</span>
             <Activity size={18} color="#00f0ff" />
           </div>
           <div className="mono glow-text" style={{ fontSize: '28px', fontWeight: 800, color: '#00f0ff' }}>
-            {totalEvents}
+            {animTotalEvents}
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>Streamed over WebSocket / HTTP</p>
         </div>
@@ -328,7 +450,7 @@ export default function App() {
             <AlertTriangle size={18} color="#ff9f1c" />
           </div>
           <div className="mono" style={{ fontSize: '28px', fontWeight: 800, color: '#ff9f1c' }}>
-            {anomalyCount}
+            {animAnomalyCount}
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>Rule Engine & Shannon Heuristics</p>
         </div>
@@ -339,7 +461,7 @@ export default function App() {
             <Flame size={18} color="#ff2a6d" />
           </div>
           <div className="mono" style={{ fontSize: '28px', fontWeight: 800, color: '#ff2a6d' }}>
-            {criticalCount}
+            {animCriticalCount}
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>Require AI Triage & Defense</p>
         </div>
@@ -350,7 +472,7 @@ export default function App() {
             <Terminal size={18} color="#7000ff" />
           </div>
           <div className="mono" style={{ fontSize: '28px', fontWeight: 800, color: '#b566ff' }}>
-            {honeytokenCount}
+            {animHoneytokenCount}
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>Decoy `/.env` & secret traps</p>
         </div>
@@ -361,14 +483,14 @@ export default function App() {
             <Radio size={18} color="#05ffa1" />
           </div>
           <div className="mono" style={{ fontSize: '28px', fontWeight: 800, color: '#05ffa1' }}>
-            {avgEntropy}
+            {typeof animAvgEntropy === 'number' ? animAvgEntropy.toFixed(2) : animAvgEntropy}
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginTop: '4px' }}>Threshold anomaly limit: &gt; 4.5</p>
         </div>
       </div>
 
       {/* Main Grid: Telemetry Table + Gemini Inspector Sidebar */}
-      <div style={{ display: 'grid', gridTemplateColumns: selectedIncident ? '1fr 440px' : '1fr', gap: '24px' }}>
+      <div className="dashboard-grid" style={{ display: 'grid', gridTemplateColumns: selectedIncident ? '1fr 440px' : '1fr', gap: '24px' }}>
         
         {/* Left Column: Live Telemetry Feed */}
         <div className="glass-panel" style={{ padding: '24px', minHeight: '600px' }}>
@@ -400,6 +522,7 @@ export default function App() {
                     outline: 'none',
                     width: '210px'
                   }}
+                  aria-label="Filter events search query"
                 />
               </div>
 
@@ -465,6 +588,8 @@ export default function App() {
                   <th style={{ padding: '12px' }}>Endpoint</th>
                   <th style={{ padding: '12px' }}>HTTP Status</th>
                   <th style={{ padding: '12px' }}>Classification</th>
+                  <th style={{ padding: '12px' }}>Confidence</th>
+                  <th style={{ padding: '12px' }}>Severity</th>
                   <th style={{ padding: '12px' }}>Entropy</th>
                   <th style={{ padding: '12px', textAlign: 'right' }}>Actions</th>
                 </tr>
@@ -472,19 +597,39 @@ export default function App() {
               <tbody>
                 {filteredLogs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-dim)' }}>
-                      No events matching filter. Click "Trigger Exploit" or "Simulate Normal" above to generate traffic.
+                    <td colSpan={9} style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-dim)' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                        <Activity size={36} color="var(--primary)" style={{ opacity: 0.5 }} />
+                        <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-main)' }}>No Telemetry Events Streamed</span>
+                        <p style={{ fontSize: '13px', color: 'var(--text-muted)', maxWidth: '400px', lineHeight: '1.4' }}>
+                          Select an option in the Attack Simulator above or submit a manual log entry to populate live security data.
+                        </p>
+                        <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                          <button className="btn-secondary" onClick={() => triggerScenario(1)} style={{ fontSize: '12px', padding: '6px 12px' }}>
+                            <Flame size={13} color="#ff9f1c" />
+                            Trigger Simulator
+                          </button>
+                          <button className="btn-primary" onClick={() => setShowManualModal(true)} style={{ fontSize: '12px', padding: '6px 12px', background: 'linear-gradient(135deg, #05ffa1 0%, #00b4d8 100%)', color: '#000' }}>
+                            <Plus size={13} color="#000" />
+                            Ingest Manual Log
+                          </button>
+                        </div>
+                      </div>
                     </td>
                   </tr>
                 ) : (
                   filteredLogs.map((log, index) => {
                     const isSelected = selectedIncident && selectedIncident.timestamp === log.timestamp && selectedIncident.ip === log.ip;
+                    const borderLeftColor = getSeverityColor(log.severity, log.is_anomaly);
+                    const confidencePercent = Math.round((log.ml_probability ?? (log.is_anomaly ? 0.95 : 0.05)) * 100);
+                    
                     return (
                       <tr
-                        key={index}
+                        key={getEventId(log)}
                         className="new-row"
                         style={{
                           borderBottom: '1px solid rgba(255,255,255,0.04)',
+                          borderLeft: `4px solid ${borderLeftColor}`,
                           background: isSelected ? 'rgba(0, 240, 255, 0.08)' : log.is_anomaly ? 'rgba(255, 42, 109, 0.04)' : 'transparent',
                           transition: 'background 0.15s ease'
                         }}
@@ -495,7 +640,7 @@ export default function App() {
                         <td className="mono" style={{ padding: '12px', color: '#00f0ff', fontWeight: 600 }}>
                           {log.ip}
                         </td>
-                        <td className="mono" style={{ padding: '12px', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={log.endpoint}>
+                        <td className="mono" style={{ padding: '12px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={log.endpoint}>
                           <span style={{ color: log.method === 'GET' ? '#05ffa1' : '#ff9f1c', marginRight: '6px', fontWeight: 700 }}>
                             {log.method}
                           </span>
@@ -506,16 +651,21 @@ export default function App() {
                             {log.status_code}
                           </span>
                         </td>
+                        <td style={{ padding: '12px', fontWeight: 600, color: 'var(--text-main)', fontSize: '12px' }}>
+                          {getClassificationLabel(log.threat_type, log.is_anomaly)}
+                        </td>
                         <td style={{ padding: '12px' }}>
-                          {log.is_anomaly ? (
-                            <span className={`badge ${getSeverityBadgeClass(log.severity)}`}>
-                              {log.threat_type || 'ANOMALY'}
-                            </span>
-                          ) : (
-                            <span className="badge badge-low" style={{ opacity: 0.7 }}>
-                              NORMAL
-                            </span>
-                          )}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <div style={{ width: '50px', height: '6px', borderRadius: '3px', background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
+                              <div style={{ width: `${confidencePercent}%`, height: '100%', background: borderLeftColor }}></div>
+                            </div>
+                            <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{confidencePercent}%</span>
+                          </div>
+                        </td>
+                        <td style={{ padding: '12px' }}>
+                          <span className={`badge ${getSeverityBadgeClass(log.severity, log.is_anomaly)}`}>
+                            {log.is_anomaly ? (log.severity || 'MEDIUM') : 'NORMAL'}
+                          </span>
                         </td>
                         <td className="mono" style={{ padding: '12px', color: log.shannon_entropy > 4.5 ? '#ff2a6d' : 'var(--text-muted)' }}>
                           {log.shannon_entropy ? log.shannon_entropy.toFixed(2) : '0.00'}
@@ -526,6 +676,7 @@ export default function App() {
                               onClick={() => setSelectedIncident(log)}
                               className="btn-secondary"
                               style={{ padding: '4px 10px', fontSize: '11px', gap: '4px', background: isSelected ? 'var(--primary)' : 'rgba(255,255,255,0.06)', color: isSelected ? '#000' : 'var(--text-main)' }}
+                              aria-label={`Inspect anomaly for IP ${log.ip}`}
                             >
                               <Cpu size={12} />
                               AI Triage
@@ -555,6 +706,7 @@ export default function App() {
               <button
                 onClick={() => setSelectedIncident(null)}
                 style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '18px' }}
+                aria-label="Close Gemini AI Inspector Panel"
               >
                 ✕
               </button>
@@ -563,24 +715,36 @@ export default function App() {
             {/* Target Brief */}
             <div style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', borderRadius: '8px', marginBottom: '16px', border: '1px solid var(--border-color)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span className={`badge ${getSeverityBadgeClass(selectedIncident.severity)}`}>
-                  {selectedIncident.severity} SEVERITY
+                <span className={`badge ${getSeverityBadgeClass(selectedIncident.severity, selectedIncident.is_anomaly)}`}>
+                  {selectedIncident.severity || 'MEDIUM'} SEVERITY
                 </span>
-                <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                
+                {/* Clickable MITRE Technique Badge */}
+                <a
+                  href={`https://attack.mitre.org/techniques/${(selectedIncident.mitre_id || 'T1190').replace(/\./g, '/')}/`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="badge badge-high"
+                  style={{ textDecoration: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                  title="View MITRE ATT&CK Technique Details"
+                >
                   MITRE: {selectedIncident.mitre_id || 'T1190'}
-                </span>
+                  <ExternalLink size={10} />
+                </a>
               </div>
+              
               <div className="mono" style={{ fontSize: '13px', color: '#00f0ff', wordBreak: 'break-all', fontWeight: 600 }}>
                 {selectedIncident.ip} &rarr; {selectedIncident.endpoint}
               </div>
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                Rule: {selectedIncident.rule_matched}
+                Rule: {selectedIncident.rule_matched || 'CSIC Heuristic Match'}
               </div>
             </div>
 
             {/* Gemini Triage Response */}
             {selectedIncident.gemini_triage ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {/* Fallback Warning Banner */}
                 {selectedIncident.gemini_triage.plain_summary && selectedIncident.gemini_triage.plain_summary.toLowerCase().includes('fallback') && (
                   <div style={{ background: 'rgba(255, 159, 28, 0.12)', border: '1px solid rgba(255, 159, 28, 0.4)', borderRadius: '6px', padding: '8px 12px', fontSize: '11px', color: '#ff9f1c', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <AlertTriangle size={14} color="#ff9f1c" />
@@ -593,7 +757,7 @@ export default function App() {
                     Plain-English Threat Summary
                   </h4>
                   <p style={{ fontSize: '13px', color: 'var(--text-main)', lineHeight: '1.5', background: 'rgba(0, 240, 255, 0.05)', padding: '12px', borderRadius: '8px', borderLeft: '3px solid #00f0ff' }}>
-                    {selectedIncident.gemini_triage.plain_english_summary}
+                    {selectedIncident.gemini_triage.plain_english_summary || selectedIncident.gemini_triage.plain_summary || 'Anomalous traffic vector detected targeting sensitive endpoints.'}
                   </p>
                 </div>
 
@@ -602,7 +766,7 @@ export default function App() {
                     Technical Breakdown
                   </h4>
                   <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
-                    {selectedIncident.gemini_triage.technical_details}
+                    {selectedIncident.gemini_triage.technical_details || 'Request contains high shannon entropy or signature matching known attack patterns.'}
                   </p>
                 </div>
 
@@ -616,6 +780,7 @@ export default function App() {
                       <button
                         onClick={() => copyToClipboard(selectedIncident.gemini_triage.remediation_snippet)}
                         style={{ background: 'transparent', border: 'none', color: copiedSnippet ? '#05ffa1' : 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' }}
+                        aria-label="Copy remediation command to clipboard"
                       >
                         {copiedSnippet ? <Check size={12} /> : <Copy size={12} />}
                         {copiedSnippet ? 'Copied!' : 'Copy'}
@@ -628,9 +793,22 @@ export default function App() {
                 )}
               </div>
             ) : (
-              <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)' }}>
-                <Cpu size={32} color="#00f0ff" style={{ opacity: 0.6, marginBottom: '8px' }} />
-                <p style={{ fontSize: '13px' }}>AI Incident analysis was logged or model is loading...</p>
+              /* Loading Skeleton State */
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', padding: '12px 0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Cpu size={16} color="#00f0ff" className="pulse-skeleton" />
+                  <span style={{ fontSize: '12px', color: 'var(--primary)' }}>Gemini AI Triage Engine Analyzing Vector...</span>
+                </div>
+                
+                <div>
+                  <div className="skeleton-box" style={{ height: '14px', width: '40%', marginBottom: '8px' }}></div>
+                  <div className="skeleton-box" style={{ height: '60px', width: '100%' }}></div>
+                </div>
+
+                <div>
+                  <div className="skeleton-box" style={{ height: '14px', width: '35%', marginBottom: '8px' }}></div>
+                  <div className="skeleton-box" style={{ height: '45px', width: '100%' }}></div>
+                </div>
               </div>
             )}
           </div>
@@ -668,6 +846,7 @@ export default function App() {
               <button
                 onClick={() => setShowManualModal(false)}
                 style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '20px', cursor: 'pointer' }}
+                aria-label="Close Manual Log Ingestion Modal"
               >
                 ✕
               </button>
@@ -771,3 +950,4 @@ export default function App() {
     </div>
   );
 }
+
