@@ -49,6 +49,19 @@ HONEYTOKEN_ENDPOINTS = [
     "/id_rsa"
 ]
 
+# Cross-Site Scripting (XSS) regex patterns
+XSS_PATTERNS = [
+    r"(?i)<script\b",
+    r"(?i)javascript:",
+    r"(?i)onerror\s*=",
+    r"(?i)onload\s*=",
+    r"(?i)eval\(",
+    r"(?i)alert\(",
+    r"(?i)<iframe\b",
+    r"(?i)%3Cscript",
+    r"(?i)%3C%2Fscript"
+]
+
 from app.memory import episodic_memory
 from app.ml_model import ml_classifier
 
@@ -90,6 +103,17 @@ def analyze_log_entry(entry: LogEntry) -> dict:
                 severity = "CRITICAL"
                 mitre_id = "T1190"
                 rule_matched = f"SQL Injection pattern matched: {pattern}"
+                break
+
+    # Rule 2.5: Cross-Site Scripting (XSS) Detection
+    if not is_anomaly:
+        for pattern in XSS_PATTERNS:
+            if re.search(pattern, endpoint) or re.search(pattern, raw_log):
+                is_anomaly = True
+                threat_type = "XSS_ATTACK"
+                severity = "HIGH"
+                mitre_id = "T1059.007"
+                rule_matched = f"XSS pattern matched: {pattern}"
                 break
 
     # Rule 3: Brute Force / Unauthorized Access
@@ -139,7 +163,11 @@ def analyze_log_entry(entry: LogEntry) -> dict:
             severity=severity
         )
 
+    import uuid
+    inc_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+
     return {
+        "incident_id": inc_id,
         "timestamp": ts,
         "ip": entry.ip,
         "method": method,

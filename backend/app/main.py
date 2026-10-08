@@ -122,6 +122,16 @@ async def get_incidents(limit: int = 10):
     incidents = await cursor.to_list(length=limit)
     return {"incidents": incidents}
 
+@app.delete("/api/incidents")
+async def clear_incidents():
+    if db is not None:
+        try:
+            await db.incidents.delete_many({})
+            await db.raw_logs.delete_many({})
+        except Exception as err:
+            print(f"Mongo clear error: {err}")
+    return {"success": True, "message": "All incident data cleared cleanly"}
+
 @app.post("/api/simulate")
 async def simulate_redteam_scenario(payload: dict):
     scenario = payload.get("scenario", 1)

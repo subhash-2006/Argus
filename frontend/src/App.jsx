@@ -18,7 +18,8 @@ import {
   Flame,
   Search,
   Server,
-  Plus
+  Plus,
+  Trash2
 } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -148,8 +149,9 @@ export default function App() {
       });
       const data = await res.json();
       if (data.analysis) {
-        setLogs((prev) => [data.analysis, ...prev].slice(0, 100));
+        setLogs((prev) => dedupeEvents([data.analysis, ...prev]).slice(0, 100));
         if (data.analysis.is_anomaly) {
+          setIncidents((prev) => dedupeEvents([data.analysis, ...prev]).slice(0, 50));
           setSelectedIncident(data.analysis);
         }
       }
@@ -158,6 +160,18 @@ export default function App() {
       console.error("Manual log ingest error:", err);
     } finally {
       setIsSimulating(false);
+    }
+  };
+
+  // Clear All Feed Data Handler
+  const handleClearData = async () => {
+    setLogs([]);
+    setIncidents([]);
+    setSelectedIncident(null);
+    try {
+      await fetch(`${API_BASE}/api/incidents`, { method: 'DELETE' });
+    } catch (err) {
+      console.error("Clear data error:", err);
     }
   };
 
@@ -285,6 +299,11 @@ export default function App() {
             <button className="btn-primary" onClick={() => triggerScenario(3)} disabled={isSimulating} style={{ fontSize: '12px', padding: '8px 14px' }}>
               <Zap size={14} />
               Scenario 3: Multi-Stage APT
+            </button>
+
+            <button className="btn-secondary" onClick={handleClearData} style={{ fontSize: '12px', padding: '8px 12px', borderColor: 'rgba(255, 42, 109, 0.4)', color: '#ff2a6d' }}>
+              <Trash2 size={14} color="#ff2a6d" />
+              Clear Data
             </button>
           </div>
         </div>
