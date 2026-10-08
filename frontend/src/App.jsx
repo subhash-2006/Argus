@@ -20,11 +20,24 @@ import {
   Trash2,
   Clock,
   List,
-  Layers
+  Layers,
+  Download,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
 const WS_URL = 'ws://127.0.0.1:8000/ws/alerts';
+
+// Strict IP Address Validation Regex (IPv4 and IPv6)
+const IPV4_REGEX = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+const IPV6_REGEX = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/;
+
+const isValidIP = (ip) => {
+  if (!ip || typeof ip !== 'string') return false;
+  const cleanIp = ip.trim();
+  return IPV4_REGEX.test(cleanIp) || IPV6_REGEX.test(cleanIp);
+};
 
 const getEventId = (item) => item.incident_id || item._id || `${item.timestamp}_${item.ip}_${item.endpoint}_${item.method}`;
 
@@ -91,6 +104,14 @@ const groupEvents = (rawLogs) => {
       });
     }
   }
+
+  // Treat a brute-force group with >= 10 failed auth events inside 60s as CRITICAL
+  for (const g of groups) {
+    if ((g.threat_type === 'BRUTE_FORCE' || g.endpoint.includes('/auth') || g.endpoint.includes('/login')) && g.count >= 10) {
+      g.severity = 'CRITICAL';
+    }
+  }
+
   return groups;
 };
 
@@ -162,6 +183,42 @@ const getClassificationLabel = (threatType, isAnomaly) => {
   }
 };
 
+// Recommended Response steps mapping by threat type
+const getRecommendedActions = (threatType) => {
+  switch (threatType) {
+    case 'BRUTE_FORCE':
+      return [
+        "Block client IP address at firewall perimeter",
+        "Enable rate limiting and account lockout policy",
+        "Require Multi-Factor Authentication (MFA)"
+      ];
+    case 'SQL_INJECTION':
+      return [
+        "Block client IP address immediately",
+        "Enforce parameterized SQL queries across backend API",
+        "Review WAF inspection rules and parameter validation"
+      ];
+    case 'HONEYTOKEN_ACCESS':
+      return [
+        "Block client IP address at perimeter",
+        "Rotate any exposed API tokens or secret credentials",
+        "Audit system and decoy file access logs"
+      ];
+    case 'XSS_ATTACK':
+      return [
+        "Enforce strict context-aware HTML output encoding",
+        "Add Content Security Policy (CSP) headers",
+        "Sanitize all user-supplied input parameters"
+      ];
+    default:
+      return [
+        "Review request parameters manually",
+        "Verify client IP address and user-agent string",
+        "Monitor source IP for anomalous burst patterns"
+      ];
+  }
+};
+
 export default function App() {
   const [logs, setLogs] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -170,8 +227,10 @@ export default function App() {
   const [selectedIncident, setSelectedIncident] = useState(null);
   const [inspectorTab, setInspectorTab] = useState('overview'); // 'overview' | 'timeline'
   const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const [containedIncidents, setContainedIncidents] = useState(new Set()); // Track contained incident IDs
   const [wsConnected, setWsConnected] = useState(false);
   const [healthStatus, setHealthStatus] = useState({ status: 'checking', mongodb: 'unknown', gemini: 'unknown' });
+  const [lastTriageWasFallback, setLastTriageWasFallback] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
 
@@ -187,6 +246,17 @@ export default function App() {
   });
 
   const wsRef = useRef(null);
+
+  // Update Gemini triage status state when selected incident changes
+  useEffect(() => {
+    if (selectedIncident && selectedIncident.gemini_triage) {
+      const isFallback = Boolean(
+        selectedIncident.gemini_triage.plain_summary &&
+        selectedIncident.gemini_triage.plain_summary.toLowerCase().includes('fallback')
+      );
+      setLastTriageWasFallback(isFallback);
+    }
+  }, [selectedIncident]);
 
   // Fetch initial system health & incidents
   const fetchHealthAndIncidents = async () => {
@@ -338,6 +408,19 @@ export default function App() {
     });
   };
 
+  // Toggle Incident Contained Status
+  const toggleContained = (incId) => {
+    setContainedIncidents(prev => {
+      const next = new Set(prev);
+      if (next.has(incId)) {
+        next.delete(incId);
+      } else {
+        next.add(incId);
+      }
+      return next;
+    });
+  };
+
   // Metrics calculation
   const totalEvents = logs.length;
   const anomalyCount = logs.filter(l => l.is_anomaly).length;
@@ -383,6 +466,150 @@ export default function App() {
     setTimeout(() => setCopiedSnippet(false), 2000);
   };
 
+  // Export Incident Report as JSON File
+  const exportIncidentReport = (incident) => {
+    if (!incident) return;
+    const incKey = getEventId(incident);
+    const isContained = containedIncidents.has(incKey);
+
+    const relatedEvents = selectedIncidentEvents.length > 0
+      ? selectedIncidentEvents
+      : logs.filter(l => l.ip === incident.ip || (incident.endpoint && l.endpoint === incident.endpoint));
+    const eventsList = relatedEvents.length > 0 ? relatedEvents : [incident];
+
+    const timeline = eventsList.map(e => ({
+      timestamp: e.timestamp,
+      method: e.method,
+      endpoint: e.endpoint,
+      status_code: e.status_code,
+      threat_type: e.threat_type,
+      mitre_id: e.mitre_id,
+      shannon_entropy: e.shannon_entropy,
+      raw_log: e.raw_log || ""
+    }));
+
+    const validIp = isValidIP(incident.ip);
+    const firewallCmd = validIp ? `iptables -A INPUT -s ${incident.ip.trim()} -j DROP` : "Invalid source IP - command not generated";
+
+    // Summary & Technical Details (strip fallback note)
+    let summaryText = incident.gemini_triage?.plain_english_summary || incident.gemini_triage?.plain_summary;
+    if (!summaryText) {
+      if (incident.threat_type === "SQL_INJECTION") {
+        const combined = `${incident.endpoint || ""} ${incident.raw_log || ""}`.toLowerCase();
+        let targetDesc = "database operations";
+        if (/(password|mysql\.user|user|users|credential|auth)/.test(combined)) {
+          targetDesc = "credential theft and sensitive user data extraction";
+        } else if (/(schema|table|column|information_schema)/.test(combined)) {
+          targetDesc = "database schema reconnaissance";
+        } else if (/(drop|truncate|delete)/.test(combined)) {
+          targetDesc = "database destruction and table modification";
+        }
+        summaryText = `A malicious SQL injection attack query was detected targeting '${incident.endpoint}'. The request attempted ${targetDesc}.`;
+      } else {
+        summaryText = "Anomalous web traffic detected.";
+      }
+    }
+    summaryText = summaryText.replace(/\s*\(Gemini AI automated triage fallback[^)]*\)/gi, '').trim();
+
+    let technicalDetailsText = incident.gemini_triage?.technical_details || "Baseline anomaly threshold exceeded.";
+    technicalDetailsText = technicalDetailsText.replace(/\s*\(Gemini AI automated triage fallback[^)]*\)/gi, '').trim();
+
+    // Collect all matched rules into an array
+    const rulesSet = new Set();
+    eventsList.forEach(e => {
+      if (Array.isArray(e.rule_matched)) {
+        e.rule_matched.forEach(r => { if (r && r !== "None") rulesSet.add(r); });
+      } else if (e.rule_matched && e.rule_matched !== "None") {
+        rulesSet.add(e.rule_matched);
+      }
+    });
+    if (Array.isArray(incident.rule_matched)) {
+      incident.rule_matched.forEach(r => { if (r && r !== "None") rulesSet.add(r); });
+    } else if (incident.rule_matched && incident.rule_matched !== "None") {
+      rulesSet.add(incident.rule_matched);
+    }
+    const rule_matched = rulesSet.size > 0 ? Array.from(rulesSet) : ["None"];
+
+    // Timestamps
+    const eventTimestamps = eventsList
+      .map(e => new Date(e.timestamp || Date.now()).getTime())
+      .filter(t => !isNaN(t));
+
+    const first_seen = eventTimestamps.length > 0
+      ? new Date(Math.min(...eventTimestamps)).toISOString()
+      : new Date(incident.timestamp || Date.now()).toISOString();
+
+    const last_seen = eventTimestamps.length > 0
+      ? new Date(Math.max(...eventTimestamps)).toISOString()
+      : new Date(incident.timestamp || Date.now()).toISOString();
+
+    const total_events = eventsList.length;
+
+    // Decoded endpoint
+    let decoded_endpoint = incident.endpoint || "";
+    try {
+      decoded_endpoint = decodeURIComponent(incident.endpoint || "");
+    } catch (e) {
+      decoded_endpoint = incident.endpoint || "";
+    }
+
+    // Detection source
+    const mlProb = typeof incident.ml_anomaly_prob === 'number'
+      ? incident.ml_anomaly_prob
+      : (incident.confidence || 0);
+    const hasRuleMatch = rule_matched.length > 0 && rule_matched[0] !== "None";
+    const hasMlMatch = mlProb >= 0.9 || incident.threat_type === "ML_CLASSIFIED_ANOMALY";
+
+    let detection_source = "rule";
+    if (hasRuleMatch && hasMlMatch) {
+      detection_source = "rule+ml";
+    } else if (hasMlMatch) {
+      detection_source = "ml";
+    } else {
+      detection_source = "rule";
+    }
+
+    const reportData = {
+      incident_id: incident.incident_id || incKey,
+      generated_at: new Date().toISOString(),
+      status: isContained ? "Contained (simulated)" : "Open",
+      ip: incident.ip,
+      endpoint: incident.endpoint,
+      decoded_endpoint: decoded_endpoint,
+      method: incident.method,
+      status_code: incident.status_code !== undefined ? incident.status_code : 200,
+      user_agent: incident.user_agent || "Unknown",
+      severity: incident.severity || "MEDIUM",
+      threat_type: incident.threat_type,
+      mitre_id: incident.mitre_id || "T1190",
+      rule_matched: rule_matched,
+      ml_anomaly_prob: mlProb,
+      detection_source: detection_source,
+      raw_log: incident.raw_log || "",
+      triage_source: incident.gemini_triage && !lastTriageWasFallback ? "Gemini" : "Rule-based",
+      summary: summaryText,
+      technical_details: technicalDetailsText,
+      recommended_remediation: {
+        action_steps: getRecommendedActions(incident.threat_type),
+        firewall_command: firewallCmd
+      },
+      first_seen: first_seen,
+      last_seen: last_seen,
+      total_events: total_events,
+      timeline_events: timeline
+    };
+
+    const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `incident_${incident.incident_id || 'report'}_report.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div style={{ padding: '20px 28px', maxWidth: '1600px', margin: '0 auto' }}>
       {/* Top Professional Header */}
@@ -394,7 +621,6 @@ export default function App() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h1 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-main)', letterSpacing: '0.2px' }}>Log Sentinel</h1>
-              <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)', background: '#1e2430', padding: '2px 6px', borderRadius: '4px', border: '1px solid var(--border-color)' }}>v2.4</span>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Web log threat detection</p>
           </div>
@@ -415,8 +641,8 @@ export default function App() {
               <span>MongoDB</span>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }} title="Gemini AI Triage Engine">
-              <span className="status-dot online"></span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }} title="Gemini AI Triage Engine Status">
+              <span className={`status-dot ${!lastTriageWasFallback && healthStatus.gemini === 'configured' ? 'online' : 'warning'}`}></span>
               <span>Gemini AI</span>
             </div>
           </div>
@@ -785,185 +1011,255 @@ export default function App() {
         </div>
 
         {/* Right Column: Inspector Panel (Overview / Timeline Tabs) */}
-        {selectedIncident && (
-          <div className="glass-panel" style={{ padding: '20px', height: 'fit-content' }}>
-            
-            {/* Header & Tabs */}
-            <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', marginBottom: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-main)' }}>Incident Inspector</h3>
-                <button
-                  onClick={() => setSelectedIncident(null)}
-                  style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}
-                  aria-label="Close Inspector Panel"
-                >
-                  ✕
-                </button>
+        {selectedIncident && (() => {
+          const currentIncKey = getEventId(selectedIncident);
+          const isContained = containedIncidents.has(currentIncKey);
+          const validIp = isValidIP(selectedIncident.ip);
+          const firewallCommand = validIp
+            ? (selectedIncident.gemini_triage?.remediation_snippet || `iptables -A INPUT -s ${selectedIncident.ip.trim()} -j DROP`)
+            : "Invalid source IP - command not generated";
+          const recommendedActions = getRecommendedActions(selectedIncident.threat_type);
+          const isTriageFallback = Boolean(
+            selectedIncident.gemini_triage?.plain_summary &&
+            selectedIncident.gemini_triage.plain_summary.toLowerCase().includes('fallback')
+          );
+
+          return (
+            <div className="glass-panel" style={{ padding: '20px', height: 'fit-content' }}>
+              
+              {/* Header, Export & Tabs */}
+              <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', marginBottom: '14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                  <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-main)' }}>Incident Inspector</h3>
+                  
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => exportIncidentReport(selectedIncident)}
+                      style={{ fontSize: '11px', padding: '3px 8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                      title="Download Incident Summary as JSON Report"
+                      aria-label="Export Incident Report as JSON"
+                    >
+                      <Download size={12} />
+                      Export report
+                    </button>
+
+                    <button
+                      onClick={() => setSelectedIncident(null)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}
+                      aria-label="Close Inspector Panel"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+
+                {/* Inspector Tabs */}
+                <div style={{ display: 'flex', gap: '8px', background: '#1e2430', padding: '2px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                  <button
+                    onClick={() => setInspectorTab('overview')}
+                    style={{
+                      flex: 1,
+                      background: inspectorTab === 'overview' ? '#2563eb' : 'transparent',
+                      color: inspectorTab === 'overview' ? '#fff' : 'var(--text-muted)',
+                      border: 'none',
+                      padding: '5px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Overview
+                  </button>
+                  <button
+                    onClick={() => setInspectorTab('timeline')}
+                    style={{
+                      flex: 1,
+                      background: inspectorTab === 'timeline' ? '#2563eb' : 'transparent',
+                      color: inspectorTab === 'timeline' ? '#fff' : 'var(--text-muted)',
+                      border: 'none',
+                      padding: '5px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '4px'
+                    }}
+                  >
+                    <Clock size={12} />
+                    Timeline ({selectedIncidentEvents.length})
+                  </button>
+                </div>
               </div>
 
-              {/* Inspector Tabs */}
-              <div style={{ display: 'flex', gap: '8px', background: '#1e2430', padding: '2px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
-                <button
-                  onClick={() => setInspectorTab('overview')}
-                  style={{
-                    flex: 1,
-                    background: inspectorTab === 'overview' ? '#2563eb' : 'transparent',
-                    color: inspectorTab === 'overview' ? '#fff' : 'var(--text-muted)',
-                    border: 'none',
-                    padding: '5px',
-                    borderRadius: '4px',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    cursor: 'pointer'
-                  }}
-                >
-                  Overview
-                </button>
-                <button
-                  onClick={() => setInspectorTab('timeline')}
-                  style={{
-                    flex: 1,
-                    background: inspectorTab === 'timeline' ? '#2563eb' : 'transparent',
-                    color: inspectorTab === 'timeline' ? '#fff' : 'var(--text-muted)',
-                    border: 'none',
-                    padding: '5px',
-                    borderRadius: '4px',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '4px'
-                  }}
-                >
-                  <Clock size={12} />
-                  Timeline ({selectedIncidentEvents.length})
-                </button>
-              </div>
-            </div>
+              {/* Target Summary Brief & Incident Status Bar */}
+              <div style={{ background: '#11151c', padding: '12px', borderRadius: '6px', marginBottom: '14px', border: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: getSeverityColor(selectedIncident.severity, selectedIncident.is_anomaly) }}>
+                    ● {selectedIncident.severity || 'MEDIUM'} SEVERITY
+                  </span>
+                  
+                  {/* MITRE External Link Badge */}
+                  <a
+                    href={`https://attack.mitre.org/techniques/${(selectedIncident.mitre_id || 'T1190').replace(/\./g, '/')}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: '11px', color: '#38bdf8', textDecoration: 'none', background: 'rgba(56, 189, 248, 0.1)', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(56, 189, 248, 0.3)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                  >
+                    MITRE: {selectedIncident.mitre_id || 'T1190'}
+                    <ExternalLink size={10} />
+                  </a>
+                </div>
 
-            {/* Target Summary Brief */}
-            <div style={{ background: '#11151c', padding: '12px', borderRadius: '6px', marginBottom: '14px', border: '1px solid var(--border-color)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                <span style={{ fontSize: '12px', fontWeight: 700, color: getSeverityColor(selectedIncident.severity, selectedIncident.is_anomaly) }}>
-                  ● {selectedIncident.severity || 'MEDIUM'} SEVERITY
-                </span>
+                <div className="mono" style={{ fontSize: '12px', color: '#38bdf8', wordBreak: 'break-all', fontWeight: 600 }}>
+                  {selectedIncident.ip} &rarr; {selectedIncident.endpoint}
+                </div>
                 
-                {/* MITRE External Link Badge */}
-                <a
-                  href={`https://attack.mitre.org/techniques/${(selectedIncident.mitre_id || 'T1190').replace(/\./g, '/')}/`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ fontSize: '11px', color: '#38bdf8', textDecoration: 'none', background: 'rgba(56, 189, 248, 0.1)', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(56, 189, 248, 0.3)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
-                >
-                  MITRE: {selectedIncident.mitre_id || 'T1190'}
-                  <ExternalLink size={10} />
-                </a>
-              </div>
-
-              <div className="mono" style={{ fontSize: '12px', color: '#38bdf8', wordBreak: 'break-all', fontWeight: 600 }}>
-                {selectedIncident.ip} &rarr; {selectedIncident.endpoint}
-              </div>
-              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                Rule: {selectedIncident.rule_matched || 'Rule Engine Detection'}
-              </div>
-            </div>
-
-            {/* TAB CONTENT 1: OVERVIEW */}
-            {inspectorTab === 'overview' && (
-              <div>
-                {selectedIncident.gemini_triage ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                    {/* Small Rule-based summary Tag if fallback */}
-                    {selectedIncident.gemini_triage.plain_summary && selectedIncident.gemini_triage.plain_summary.toLowerCase().includes('fallback') && (
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: '#1e2430', color: '#f59e0b', padding: '3px 8px', borderRadius: '4px', fontSize: '11px', width: 'fit-content', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
-                        <span>Rule-based summary</span>
-                      </div>
+                {/* Status Indicator & Mark as Contained Button */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #1e2430' }}>
+                  <div style={{ fontSize: '11px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Status:</span>
+                    {isContained ? (
+                      <span style={{ color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <CheckCircle2 size={12} />
+                        Contained (simulated)
+                      </span>
+                    ) : (
+                      <span style={{ color: '#f59e0b', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <AlertCircle size={12} />
+                        Open
+                      </span>
                     )}
+                  </div>
 
-                    <div>
-                      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
-                        Threat Summary
-                      </div>
-                      <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5', background: '#11151c', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
-                        {selectedIncident.gemini_triage.plain_english_summary || selectedIncident.gemini_triage.plain_summary || 'Anomalous traffic vector detected targeting web backend.'}
-                      </p>
+                  <button
+                    className="btn-secondary"
+                    onClick={() => toggleContained(currentIncKey)}
+                    style={{ fontSize: '10px', padding: '2px 6px', background: isContained ? '#1e2430' : 'rgba(16, 185, 129, 0.15)', color: isContained ? 'var(--text-muted)' : '#10b981', borderColor: isContained ? 'var(--border-color)' : 'rgba(16, 185, 129, 0.3)' }}
+                    aria-label="Toggle incident contained status"
+                  >
+                    {isContained ? 'Reopen incident' : 'Mark as contained (simulated)'}
+                  </button>
+                </div>
+              </div>
+
+              {/* RECOMMENDED RESPONSE CARD (Prominent in Overview, visible without scrolling) */}
+              {inspectorTab === 'overview' && (
+                <div style={{ background: '#11151c', border: '1px solid #232938', borderRadius: '6px', padding: '12px', marginBottom: '14px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-main)', textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+                      Recommended Response
+                    </span>
+                    <span style={{ fontSize: '10px', background: '#1e2430', color: 'var(--text-muted)', padding: '1px 6px', borderRadius: '3px', border: '1px solid var(--border-color)' }}>
+                      Source: {!isTriageFallback && selectedIncident.gemini_triage ? 'Gemini' : 'Rule-based'}
+                    </span>
+                  </div>
+
+                  {/* Numbered Action Steps */}
+                  <ol style={{ fontSize: '12px', color: 'var(--text-main)', paddingLeft: '18px', margin: 0, lineHeight: '1.6' }}>
+                    {recommendedActions.map((act, aIdx) => (
+                      <li key={`act_${aIdx}`} style={{ marginBottom: '2px' }}>{act}</li>
+                    ))}
+                  </ol>
+
+                  {/* Validated Firewall Command Snippet */}
+                  <div style={{ marginTop: '10px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-muted)', fontWeight: 600 }}>
+                        Firewall Enforcement Command
+                      </span>
+                      {validIp && (
+                        <button
+                          onClick={() => copyToClipboard(firewallCommand)}
+                          style={{ background: 'transparent', border: 'none', color: copiedSnippet ? '#10b981' : 'var(--text-muted)', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '3px' }}
+                          aria-label="Copy firewall command to clipboard"
+                        >
+                          {copiedSnippet ? <Check size={11} /> : <Copy size={11} />}
+                          {copiedSnippet ? 'Copied' : 'Copy'}
+                        </button>
+                      )}
                     </div>
-
-                    <div>
-                      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
-                        Technical Details
-                      </div>
-                      <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
-                        {selectedIncident.gemini_triage.technical_details || 'High shannon entropy or signature matching known attack patterns.'}
-                      </p>
+                    
+                    <div className="mono" style={{ background: '#090b0e', padding: '8px 10px', borderRadius: '4px', color: validIp ? '#10b981' : '#ef4444', fontSize: '11px', border: '1px solid var(--border-color)', wordBreak: 'break-all' }}>
+                      {firewallCommand}
                     </div>
+                  </div>
+                </div>
+              )}
 
-                    {selectedIncident.gemini_triage.remediation_snippet && (
+              {/* TAB CONTENT 1: OVERVIEW DETAILS */}
+              {inspectorTab === 'overview' && (
+                <div>
+                  {selectedIncident.gemini_triage ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                       <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                          <span style={{ fontSize: '11px', fontWeight: 600, color: '#10b981' }}>Recommended Remediation</span>
-                          <button
-                            onClick={() => copyToClipboard(selectedIncident.gemini_triage.remediation_snippet)}
-                            style={{ background: 'transparent', border: 'none', color: copiedSnippet ? '#10b981' : 'var(--text-muted)', cursor: 'pointer', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '3px' }}
-                            aria-label="Copy remediation snippet"
-                          >
-                            {copiedSnippet ? <Check size={11} /> : <Copy size={11} />}
-                            {copiedSnippet ? 'Copied' : 'Copy'}
-                          </button>
+                        <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
+                          Threat Summary
                         </div>
-                        <div className="mono" style={{ background: '#090b0e', padding: '8px 10px', borderRadius: '4px', color: '#10b981', fontSize: '11px', border: '1px solid var(--border-color)', wordBreak: 'break-all' }}>
-                          {selectedIncident.gemini_triage.remediation_snippet}
+                        <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5', background: '#11151c', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                          {selectedIncident.gemini_triage.plain_english_summary || selectedIncident.gemini_triage.plain_summary || 'Anomalous traffic vector detected targeting web backend.'}
+                        </p>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
+                          Technical Details
                         </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    <div className="skeleton-box" style={{ height: '14px', width: '40%' }}></div>
-                    <div className="skeleton-box" style={{ height: '50px', width: '100%' }}></div>
-                    <div className="skeleton-box" style={{ height: '40px', width: '100%' }}></div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB CONTENT 2: TIMELINE (ATTACK STORY) */}
-            {inspectorTab === 'timeline' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>
-                  Chronological event progression for IP <span className="mono" style={{ color: '#38bdf8' }}>{selectedIncident.ip}</span>:
-                </div>
-
-                <div style={{ position: 'relative', paddingLeft: '16px', borderLeft: '2px solid #232938' }}>
-                  {selectedIncidentEvents.map((evt, idx) => (
-                    <div key={`tl_${idx}`} style={{ marginBottom: '14px', position: 'relative' }}>
-                      <div style={{ position: 'absolute', left: '-21px', top: '2px', width: '8px', height: '8px', borderRadius: '50%', background: getSeverityColor(evt.severity, evt.is_anomaly) }}></div>
-                      
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-                        <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                          {new Date(evt.timestamp).toLocaleTimeString()}
-                        </span>
-                        <span style={{ fontSize: '10px', background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', padding: '1px 5px', borderRadius: '3px' }}>
-                          {evt.mitre_id || 'T1190'}
-                        </span>
-                      </div>
-
-                      <div className="mono" style={{ fontSize: '12px', color: 'var(--text-main)', fontWeight: 600 }}>
-                        {evt.method} {evt.endpoint}
-                      </div>
-
-                      <div style={{ fontSize: '11px', color: getSeverityColor(evt.severity, evt.is_anomaly), marginTop: '2px' }}>
-                        {getClassificationLabel(evt.threat_type, evt.is_anomaly)} (Status {evt.status_code})
+                        <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
+                          {selectedIncident.gemini_triage.technical_details || 'High shannon entropy or signature matching known attack patterns.'}
+                        </p>
                       </div>
                     </div>
-                  ))}
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                      <div className="skeleton-box" style={{ height: '14px', width: '40%' }}></div>
+                      <div className="skeleton-box" style={{ height: '50px', width: '100%' }}></div>
+                      <div className="skeleton-box" style={{ height: '40px', width: '100%' }}></div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
-          </div>
-        )}
+              )}
+
+              {/* TAB CONTENT 2: TIMELINE (ATTACK STORY) */}
+              {inspectorTab === 'timeline' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Chronological event progression for IP <span className="mono" style={{ color: '#38bdf8' }}>{selectedIncident.ip}</span>:
+                  </div>
+
+                  <div style={{ position: 'relative', paddingLeft: '16px', borderLeft: '2px solid #232938' }}>
+                    {selectedIncidentEvents.map((evt, idx) => (
+                      <div key={`tl_${idx}`} style={{ marginBottom: '14px', position: 'relative' }}>
+                        <div style={{ position: 'absolute', left: '-21px', top: '2px', width: '8px', height: '8px', borderRadius: '50%', background: getSeverityColor(evt.severity, evt.is_anomaly) }}></div>
+                        
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
+                          <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                            {new Date(evt.timestamp).toLocaleTimeString()}
+                          </span>
+                          <span style={{ fontSize: '10px', background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', padding: '1px 5px', borderRadius: '3px' }}>
+                            {evt.mitre_id || 'T1190'}
+                          </span>
+                        </div>
+
+                        <div className="mono" style={{ fontSize: '12px', color: 'var(--text-main)', fontWeight: 600 }}>
+                          {evt.method} {evt.endpoint}
+                        </div>
+
+                        <div style={{ fontSize: '11px', color: getSeverityColor(evt.severity, evt.is_anomaly), marginTop: '2px' }}>
+                          {getClassificationLabel(evt.threat_type, evt.is_anomaly)} (Status {evt.status_code})
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
       </div>
 
