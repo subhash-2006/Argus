@@ -1,15 +1,47 @@
 import os
 import csv
+import re
 import joblib
+from urllib.parse import unquote, urlparse
 from typing import Tuple, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import accuracy_score
 
 MODEL_FILE = os.path.join(os.path.dirname(__file__), "csic_model.joblib")
 DATASET_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "sample_logs", "csic_database.csv")
+
+def clean_request(url: str, body: str = "") -> str:
+    """
+    Shared clean_request function used by both training and inference.
+    URL-decodes, strips scheme/host and HTTP/1.x suffix, and removes the URL path,
+    keeping only the query string and body.
+    """
+    url = url or ""
+    body = body or ""
+
+    # Strip HTTP/1.x or HTTP/2 suffix
+    url = re.sub(r"\s+HTTP/\d\.\d$", "", url, flags=re.IGNORECASE)
+
+    # URL-decode
+    decoded_url = unquote(url)
+    decoded_body = unquote(body)
+
+    # Parse query string and body, stripping scheme/host and URL path
+    parsed = urlparse(decoded_url)
+    query_str = parsed.query if parsed.query else ""
+    if not query_str and "?" in decoded_url:
+        query_str = decoded_url.split("?", 1)[1]
+
+    parts = []
+    if query_str.strip():
+        parts.append(query_str.strip())
+    if decoded_body.strip():
+        parts.append(decoded_body.strip())
+
+    return " ".join(parts).strip()
 
 class CSICAnomalyClassifier:
     def __init__(self):
@@ -22,36 +54,40 @@ class CSICAnomalyClassifier:
         texts = []
         labels = []
 
-        if not os.path.exists(csv_path):
-            print(f"Dataset file not found at {csv_path}. Using fallback synthetic dataset.")
-            self._train_fallback()
-            return
+        if os.path.exists(csv_path):
+            with open(csv_path, mode="r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.reader(f)
+                header = next(reader)
 
-        with open(csv_path, mode="r", encoding="utf-8", errors="ignore") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            
-            # Identify column indices
-            # Header: ['', 'Method', 'User-Agent', ..., 'content', 'classification', 'URL']
-            url_idx = 16 if len(header) > 16 else -1
-            content_idx = 14 if len(header) > 14 else -1
-            method_idx = 1 if len(header) > 1 else -1
-            class_idx = 15 if len(header) > 15 else -1
+                url_idx = 16 if len(header) > 16 else -1
+                content_idx = 14 if len(header) > 14 else -1
+                class_idx = 15 if len(header) > 15 else -1
 
-            for row in reader:
-                if len(row) > 15:
-                    method = row[method_idx] if method_idx != -1 else "GET"
-                    url = row[url_idx] if url_idx != -1 else ""
-                    content = row[content_idx] if content_idx != -1 else ""
-                    label_str = row[class_idx]
-                    
-                    # Target label: 1 = Anomalous, 0 = Normal
-                    label = 1 if label_str == "1" or row[0].lower() == "anomalous" else 0
-                    
-                    # Combine Method, URL, and Content payload into single text feature
-                    text_feature = f"{method} {url} {content}".strip()
-                    texts.append(text_feature)
-                    labels.append(label)
+                for row in reader:
+                    if len(row) > 15:
+                        url = row[url_idx] if url_idx != -1 else ""
+                        content = row[content_idx] if content_idx != -1 else ""
+                        label_str = row[class_idx]
+                        
+                        label = 1 if label_str == "1" or row[0].lower() == "anomalous" else 0
+                        cleaned_text = clean_request(url, content)
+                        
+                        texts.append(cleaned_text)
+                        labels.append(label)
+
+        # Add 800 synthetic normal requests in demo logs style
+        demo_normal_requests = [
+            "/home", "/products", "/products?id=1", "/products?id=2", "/products?id=3", "/products?id=4", "/products?id=5",
+            "/products?category=shoes", "/products?category=electronics", "/products?category=apparel",
+            "/about", "/contact", "/blog/post-1", "/blog/post-2", "/search?q=shoes", "/search?q=laptop", "/search?q=phone",
+            "/api/v1/items?page=1&limit=10", "/profile?user=john", "/settings?lang=en"
+        ]
+        print("Adding 800 synthetic normal requests in demo logs style...")
+        for i in range(800):
+            req_url = demo_normal_requests[i % len(demo_normal_requests)]
+            cleaned = clean_request(req_url, "")
+            texts.append(cleaned)
+            labels.append(0)
 
         print(f"Extracted {len(texts)} samples ({labels.count(0)} Normal, {labels.count(1)} Anomalous).")
 
@@ -72,27 +108,11 @@ class CSICAnomalyClassifier:
         # Evaluate model accuracy
         y_pred = self.pipeline.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
-        print(f"CSIC 2010 Model Training Complete! Validation Accuracy: {acc * 100:.2f}%")
+        print(f"CSIC Model Retrained with clean_request! Validation Accuracy: {acc * 100:.2f}%")
 
         # Save model pipeline
         joblib.dump(self.pipeline, MODEL_FILE)
         print(f"Model saved to: {MODEL_FILE}")
-        self.is_loaded = True
-
-    def _train_fallback(self):
-        # Quick fallback training if CSIC CSV is not present
-        sample_texts = [
-            "GET /home", "GET /products", "GET /about", "POST /login",
-            "GET /.env", "GET /wp-config.php", "GET /products?id=1 UNION SELECT null, username, password FROM users--",
-            "POST /admin/login", "GET /etc/passwd", "GET /search?q=%27%20UNION%20SELECT%20CHAR(39)"
-        ]
-        sample_labels = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
-        self.pipeline = Pipeline([
-            ('tfidf', TfidfVectorizer(ngram_range=(2, 4), analyzer='char_wb')),
-            ('clf', LogisticRegression())
-        ])
-        self.pipeline.fit(sample_texts, sample_labels)
-        joblib.dump(self.pipeline, MODEL_FILE)
         self.is_loaded = True
 
     def load_or_train(self):
@@ -111,10 +131,9 @@ class CSICAnomalyClassifier:
         if not self.is_loaded or self.pipeline is None:
             return False, 0.0
 
-        text = f"{method} {endpoint} {raw_log}".strip()
+        cleaned_text = clean_request(endpoint, raw_log if "?" not in endpoint and "=" not in endpoint else "")
         try:
-            probs = self.pipeline.predict_proba([text])[0]
-            # probs[1] is probability of class 1 (Anomalous)
+            probs = self.pipeline.predict_proba([cleaned_text])[0]
             anomaly_prob = float(probs[1])
             is_anomaly = anomaly_prob > 0.5
             return is_anomaly, round(anomaly_prob, 3)

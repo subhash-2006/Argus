@@ -24,6 +24,19 @@ import {
 const API_BASE = 'http://127.0.0.1:8000';
 const WS_URL = 'ws://127.0.0.1:8000/ws/alerts';
 
+const getEventId = (item) => item.incident_id || item._id || `${item.timestamp}_${item.ip}_${item.endpoint}_${item.method}`;
+
+const dedupeEvents = (list) => {
+  const map = new Map();
+  for (const item of list) {
+    const key = getEventId(item);
+    if (!map.has(key)) {
+      map.set(key, item);
+    }
+  }
+  return Array.from(map.values());
+};
+
 export default function App() {
   const [logs, setLogs] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -65,14 +78,8 @@ export default function App() {
       if (iRes.ok) {
         const iData = await iRes.json();
         if (iData.incidents) {
-          setIncidents(iData.incidents);
-          setLogs((prev) => {
-            // merge without duplicates
-            const combined = [...iData.incidents, ...prev];
-            const unique = Array.from(new Set(combined.map(a => a.timestamp + a.ip + a.endpoint)))
-              .map(id => combined.find(a => a.timestamp + a.ip + a.endpoint === id));
-            return unique.slice(0, 100);
-          });
+          setIncidents(dedupeEvents(iData.incidents));
+          setLogs((prev) => dedupeEvents([...iData.incidents, ...prev]).slice(0, 100));
         }
       }
     } catch (e) {
@@ -96,9 +103,9 @@ export default function App() {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            setLogs((prev) => [data, ...prev].slice(0, 100));
+            setLogs((prev) => dedupeEvents([data, ...prev]).slice(0, 100));
             if (data.is_anomaly) {
-              setIncidents((prev) => [data, ...prev].slice(0, 50));
+              setIncidents((prev) => dedupeEvents([data, ...prev]).slice(0, 50));
             }
           } catch (err) {
             console.error("WS Parse error:", err);
@@ -555,6 +562,13 @@ export default function App() {
             {/* Gemini Triage Response */}
             {selectedIncident.gemini_triage ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {selectedIncident.gemini_triage.plain_summary && selectedIncident.gemini_triage.plain_summary.toLowerCase().includes('fallback') && (
+                  <div style={{ background: 'rgba(255, 159, 28, 0.12)', border: '1px solid rgba(255, 159, 28, 0.4)', borderRadius: '6px', padding: '8px 12px', fontSize: '11px', color: '#ff9f1c', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <AlertTriangle size={14} color="#ff9f1c" />
+                    <span><strong>AI Triage Fallback:</strong> Request timed out or rate limit reached. Threat details provided by CSIC ML Classifier & Rule Engine.</span>
+                  </div>
+                )}
+
                 <div>
                   <h4 style={{ fontSize: '13px', textTransform: 'uppercase', color: 'var(--primary)', letterSpacing: '0.5px', marginBottom: '6px', fontWeight: 700 }}>
                     Plain-English Threat Summary

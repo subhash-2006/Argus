@@ -61,8 +61,10 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
         f"Generate a dual-persona JSON triage report. Assign incident_id='{inc_id}'."
     )
 
+    import concurrent.futures
+
     if api_key and "your_" not in api_key:
-        try:
+        def _call_gemini():
             client = genai.Client(api_key=api_key)
             models_to_try = [
                 "gemini-2.5-flash",
@@ -83,20 +85,29 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
                         ),
                     )
                     if response and response.text:
-                        parsed = GeminiTriageResult.model_validate_json(response.text)
-                        return parsed
+                        return GeminiTriageResult.model_validate_json(response.text)
                 except Exception as m_err:
                     print(f"Gemini model {model_name} warning: {m_err}")
                     continue
+            return None
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call_gemini)
+                res = future.result(timeout=4.0)
+                if res:
+                    return res
+        except concurrent.futures.TimeoutError:
+            print("Gemini API call timed out after 4 seconds. Returning fallback triage.")
         except Exception as e:
             print(f"Gemini triage API exception: {e}")
 
     # Fallback deterministic structured response using Procedural Playbook & Semantic Intel
     return GeminiTriageResult(
         incident_id=inc_id,
-        plain_summary=f"Detected suspicious {incident_data.get('threat_type', 'threat')} from IP {ip} targeting {incident_data.get('endpoint', 'server')}.",
+        plain_summary=f"Detected suspicious {incident_data.get('threat_type', 'threat')} from IP {ip} targeting {incident_data.get('endpoint', 'server')}. (Gemini AI automated triage fallback due to timeout or rate limit).",
         mitre=MitreDetail(id=mitre_id, name=semantic_intel.get("name", "Security Anomaly")),
-        confidence=0.96,
+        confidence=0.95,
         remediation=RemediationDetail(
             nginx_block=playbook["nginx_block"],
             firewall=playbook["firewall"]

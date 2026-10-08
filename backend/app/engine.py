@@ -115,13 +115,20 @@ def analyze_log_entry(entry: LogEntry) -> dict:
         mitre_id = "T1027"
         rule_matched = f"High Shannon entropy ({endpoint_entropy}) detected in URL endpoint"
 
-    # Rule 5: ML Model Detection Trigger (if rules didn't catch it but ML score > 0.85)
-    if not is_anomaly and is_ml_anomaly and ml_confidence > 0.85:
+    # Rule 5: ML Model Detection Trigger (only if no rule fired and ML probability >= 0.9)
+    if not is_anomaly and ml_confidence >= 0.9:
         is_anomaly = True
         threat_type = "ML_CLASSIFIED_ANOMALY"
-        severity = "HIGH"
+        severity = "CRITICAL" if ml_confidence > 0.97 else "MEDIUM"
         mitre_id = "T1083"
         rule_matched = f"CSIC 2010 Trained ML Model Flagged Anomaly (Confidence: {ml_confidence * 100:.1f}%)"
+
+    # Ensure NORMAL when no rule fires and ML probability is below 0.9
+    if not is_anomaly:
+        threat_type = "NORMAL"
+        severity = "INFO"
+        mitre_id = "N/A"
+        rule_matched = "None"
 
     # Record event into Episodic Memory chain if anomalous
     if is_anomaly:
