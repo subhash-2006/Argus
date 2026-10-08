@@ -82,7 +82,7 @@ def analyze_log_entry(entry: LogEntry) -> dict:
     threat_type = "NORMAL"
     severity = "INFO"
     mitre_id = "N/A"
-    rule_matched = "None"
+    rules_matched = []
 
     # Rule 1: Honeytoken Access
     for honeytoken in HONEYTOKEN_ENDPOINTS:
@@ -91,53 +91,55 @@ def analyze_log_entry(entry: LogEntry) -> dict:
             threat_type = "HONEYTOKEN_ACCESS"
             severity = "CRITICAL" if honeytoken == "/.env" else "HIGH"
             mitre_id = "T1595"
-            rule_matched = f"Honeytoken access detected: {honeytoken}"
+            rules_matched.append(f"Honeytoken access detected: {honeytoken}")
             break
 
     # Rule 2: SQL Injection Detection
-    if not is_anomaly:
-        for pattern in SQLI_PATTERNS:
-            if re.search(pattern, endpoint) or re.search(pattern, raw_log):
-                is_anomaly = True
+    for pattern in SQLI_PATTERNS:
+        if re.search(pattern, endpoint) or re.search(pattern, raw_log):
+            is_anomaly = True
+            if threat_type == "NORMAL":
                 threat_type = "SQL_INJECTION"
                 severity = "CRITICAL"
                 mitre_id = "T1190"
-                rule_matched = f"SQL Injection pattern matched: {pattern}"
-                break
+            rules_matched.append(f"SQL Injection pattern matched: {pattern}")
+            break
 
     # Rule 2.5: Cross-Site Scripting (XSS) Detection
-    if not is_anomaly:
-        for pattern in XSS_PATTERNS:
-            if re.search(pattern, endpoint) or re.search(pattern, raw_log):
-                is_anomaly = True
+    for pattern in XSS_PATTERNS:
+        if re.search(pattern, endpoint) or re.search(pattern, raw_log):
+            is_anomaly = True
+            if threat_type == "NORMAL":
                 threat_type = "XSS_ATTACK"
                 severity = "HIGH"
                 mitre_id = "T1059.007"
-                rule_matched = f"XSS pattern matched: {pattern}"
-                break
+            rules_matched.append(f"XSS pattern matched: {pattern}")
+            break
 
     # Rule 3: Brute Force / Unauthorized Access
-    if not is_anomaly:
-        if status_code == 401 or "/api/v1/auth" in endpoint:
-            is_anomaly = True
+    if status_code == 401 or "/api/v1/auth" in endpoint:
+        is_anomaly = True
+        if threat_type == "NORMAL":
             threat_type = "BRUTE_FORCE"
             severity = "HIGH" if "/login" in endpoint or "/auth" in endpoint else "MEDIUM"
             mitre_id = "T1110"
-            rule_matched = f"HTTP 401 / Auth brute force response for {endpoint}"
-        elif "/admin" in endpoint and status_code in [403, 401, 500]:
-            is_anomaly = True
+        rules_matched.append(f"HTTP 401 / Auth brute force response for {endpoint}")
+    elif "/admin" in endpoint and status_code in [403, 401, 500]:
+        is_anomaly = True
+        if threat_type == "NORMAL":
             threat_type = "UNAUTHORIZED_ADMIN_ACCESS"
             severity = "HIGH"
             mitre_id = "T1078"
-            rule_matched = f"Suspicious access attempt to admin endpoint: {endpoint}"
+        rules_matched.append(f"Suspicious access attempt to admin endpoint: {endpoint}")
 
     # Rule 4: High Entropy Anomaly
-    if not is_anomaly and endpoint_entropy > 4.5:
+    if endpoint_entropy > 4.5:
         is_anomaly = True
-        threat_type = "ANOMALOUS_ENTROPY"
-        severity = "MEDIUM"
-        mitre_id = "T1027"
-        rule_matched = f"High Shannon entropy ({endpoint_entropy}) detected in URL endpoint"
+        if threat_type == "NORMAL":
+            threat_type = "ANOMALOUS_ENTROPY"
+            severity = "MEDIUM"
+            mitre_id = "T1027"
+        rules_matched.append(f"High Shannon entropy ({endpoint_entropy}) detected in URL endpoint")
 
     # Rule 5: ML Model Detection Trigger (only if no rule fired and ML probability >= 0.9)
     if not is_anomaly and ml_confidence >= 0.9:
@@ -145,14 +147,16 @@ def analyze_log_entry(entry: LogEntry) -> dict:
         threat_type = "ML_CLASSIFIED_ANOMALY"
         severity = "CRITICAL" if ml_confidence > 0.97 else "MEDIUM"
         mitre_id = "T1083"
-        rule_matched = f"CSIC 2010 Trained ML Model Flagged Anomaly (Confidence: {ml_confidence * 100:.1f}%)"
+        rules_matched.append(f"CSIC 2010 Trained ML Model Flagged Anomaly (Confidence: {ml_confidence * 100:.1f}%)")
 
     # Ensure NORMAL when no rule fires and ML probability is below 0.9
     if not is_anomaly:
         threat_type = "NORMAL"
         severity = "INFO"
         mitre_id = "N/A"
-        rule_matched = "None"
+        rules_matched = []
+
+    final_rule_matched = rules_matched if rules_matched else ["None"]
 
     # Record event into Episodic Memory chain if anomalous
     if is_anomaly:
@@ -181,5 +185,5 @@ def analyze_log_entry(entry: LogEntry) -> dict:
         "threat_type": threat_type,
         "severity": severity,
         "mitre_id": mitre_id,
-        "rule_matched": rule_matched,
+        "rule_matched": final_rule_matched,
     }

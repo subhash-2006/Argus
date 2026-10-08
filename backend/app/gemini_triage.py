@@ -123,7 +123,18 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
         fallback_summary = f"An unauthorized client from IP {ip} attempted to access decoy trap file '{endpoint}'. This indicates automated credential scraping."
         fallback_technical = f"HTTP request to decoy file '{endpoint}' from IP {ip}. Honeytokens trigger instant high-priority alerts with zero false-positives."
     elif threat_type == "SQL_INJECTION":
-        fallback_summary = f"A malicious SQL injection attack query was detected targeting '{endpoint}'. The request attempted to manipulate database operations."
+        raw_log = incident_data.get("raw_log", "")
+        combined_text = f"{endpoint} {raw_log}".lower()
+        if any(kw in combined_text for kw in ["password", "mysql.user", "user", "users", "credential", "auth"]):
+            target_desc = "credential theft and sensitive user data extraction"
+        elif any(kw in combined_text for kw in ["schema", "table", "column", "information_schema"]):
+            target_desc = "database schema reconnaissance"
+        elif any(kw in combined_text for kw in ["drop", "truncate", "delete"]):
+            target_desc = "database destruction and table modification"
+        else:
+            target_desc = "database operations"
+
+        fallback_summary = f"A malicious SQL injection attack query was detected targeting '{endpoint}'. The request attempted {target_desc}."
         fallback_technical = f"Input matching SQL injection signature (UNION/SELECT/CHAR/comments) received from IP {ip} targeting endpoint '{endpoint}'."
     elif threat_type == "BRUTE_FORCE":
         fallback_summary = f"Surge of unauthorized authentication requests detected targeting '{endpoint}'. Indicates password guessing or credential stuffing."
@@ -137,7 +148,7 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
 
     return GeminiTriageResult(
         incident_id=inc_id,
-        plain_summary=f"{fallback_summary} (Gemini AI automated triage fallback due to timeout or rate limit).",
+        plain_summary=fallback_summary,
         technical_details=fallback_technical,
         mitre=MitreDetail(id=mitre_info["id"], name=mitre_info["name"]),
         confidence=0.95,
