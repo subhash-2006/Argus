@@ -17,7 +17,8 @@ import {
   ExternalLink,
   Flame,
   Search,
-  Server
+  Server,
+  Plus
 } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -33,6 +34,17 @@ export default function App() {
   const [healthStatus, setHealthStatus] = useState({ status: 'checking', mongodb: 'unknown', gemini: 'unknown' });
   const [isSimulating, setIsSimulating] = useState(false);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
+
+  // Manual Log Ingest Form state
+  const [showManualModal, setShowManualModal] = useState(false);
+  const [manualForm, setManualForm] = useState({
+    ip: '192.168.1.100',
+    method: 'GET',
+    endpoint: '/.env',
+    status_code: 500,
+    user_agent: 'sqlmap/1.6.4',
+    raw_log: '192.168.1.100 - - GET /.env HTTP/1.1 500'
+  });
 
   const wsRef = useRef(null);
 
@@ -112,6 +124,35 @@ export default function App() {
       if (wsRef.current) wsRef.current.close();
     };
   }, []);
+
+  // Submit manual log payload
+  const handleManualSubmit = async (e) => {
+    e.preventDefault();
+    setIsSimulating(true);
+    try {
+      const payload = {
+        ...manualForm,
+        status_code: parseInt(manualForm.status_code, 10)
+      };
+      const res = await fetch(`${API_BASE}/api/ingest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.analysis) {
+        setLogs((prev) => [data.analysis, ...prev].slice(0, 100));
+        if (data.analysis.is_anomaly) {
+          setSelectedIncident(data.analysis);
+        }
+      }
+      setShowManualModal(false);
+    } catch (err) {
+      console.error("Manual log ingest error:", err);
+    } finally {
+      setIsSimulating(false);
+    }
+  };
 
   // Trigger Red-Team Scenarios
   const triggerScenario = async (scenarioNumber) => {
@@ -219,6 +260,11 @@ export default function App() {
           </div>
 
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <button className="btn-primary" onClick={() => setShowManualModal(true)} style={{ fontSize: '12px', padding: '8px 14px', background: 'linear-gradient(135deg, #05ffa1 0%, #00b4d8 100%)', color: '#000' }}>
+              <Plus size={15} color="#000" />
+              Manual Log Ingest
+            </button>
+
             <button className="btn-secondary" onClick={() => triggerScenario(1)} disabled={isSimulating} style={{ fontSize: '12px', padding: '8px 12px' }}>
               <Flame size={14} color="#ff9f1c" />
               Scenario 1: Credential Stuffing
@@ -558,6 +604,137 @@ export default function App() {
         )}
 
       </div>
+
+      {/* Manual Log Ingest Modal */}
+      {showManualModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(5, 8, 14, 0.85)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 999
+        }}>
+          <div className="glass-panel" style={{
+            width: '100%',
+            maxWidth: '540px',
+            padding: '28px',
+            border: '1px solid rgba(5, 255, 161, 0.4)',
+            boxShadow: '0 0 40px rgba(5, 255, 161, 0.15)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Plus size={22} color="#05ffa1" />
+                <h3 style={{ fontSize: '18px', fontWeight: 700 }}>Manual Log Ingestion & AI Triage</h3>
+              </div>
+              <button
+                onClick={() => setShowManualModal(false)}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '20px', cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleManualSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Client IP Address</label>
+                  <input
+                    type="text"
+                    required
+                    value={manualForm.ip}
+                    onChange={(e) => setManualForm({ ...manualForm, ip: e.target.value })}
+                    style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '8px 12px', color: '#00f0ff', fontFamily: 'var(--font-mono)', fontSize: '13px' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>HTTP Method</label>
+                  <select
+                    value={manualForm.method}
+                    onChange={(e) => setManualForm({ ...manualForm, method: e.target.value })}
+                    style={{ width: '100%', background: '#0F1623', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '8px 12px', color: 'var(--text-main)', fontSize: '13px' }}
+                  >
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="DELETE">DELETE</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Target URL Endpoint / Query Payload</label>
+                <input
+                  type="text"
+                  required
+                  value={manualForm.endpoint}
+                  onChange={(e) => setManualForm({ ...manualForm, endpoint: e.target.value })}
+                  placeholder="e.g. /.env or /products?id=1 UNION SELECT..."
+                  style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '8px 12px', color: 'var(--text-main)', fontFamily: 'var(--font-mono)', fontSize: '13px' }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '12px' }}>
+                <div>
+                  <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>HTTP Status</label>
+                  <input
+                    type="number"
+                    required
+                    value={manualForm.status_code}
+                    onChange={(e) => setManualForm({ ...manualForm, status_code: e.target.value })}
+                    style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '8px 12px', color: 'var(--text-main)', fontFamily: 'var(--font-mono)', fontSize: '13px' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>User Agent String</label>
+                  <input
+                    type="text"
+                    value={manualForm.user_agent}
+                    onChange={(e) => setManualForm({ ...manualForm, user_agent: e.target.value })}
+                    style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '8px 12px', color: 'var(--text-main)', fontSize: '13px' }}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Raw Log Telemetry String</label>
+                <textarea
+                  rows={2}
+                  value={manualForm.raw_log}
+                  onChange={(e) => setManualForm({ ...manualForm, raw_log: e.target.value })}
+                  style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '8px 12px', color: 'var(--text-main)', fontFamily: 'var(--font-mono)', fontSize: '12px', resize: 'vertical' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowManualModal(false)}
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  style={{ background: 'linear-gradient(135deg, #05ffa1 0%, #00b4d8 100%)', color: '#000', fontWeight: 700 }}
+                >
+                  <Zap size={16} color="#000" />
+                  Ingest & Run CSIC ML Triage
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -50,6 +50,7 @@ HONEYTOKEN_ENDPOINTS = [
 ]
 
 from app.memory import episodic_memory
+from app.ml_model import ml_classifier
 
 def analyze_log_entry(entry: LogEntry) -> dict:
     ts = entry.timestamp or datetime.now(timezone.utc).isoformat()
@@ -58,8 +59,11 @@ def analyze_log_entry(entry: LogEntry) -> dict:
     status_code = entry.status_code
     method = entry.method.upper()
 
-    # Calculate entropy of endpoint and raw log
+    # 1. Calculate Shannon entropy
     endpoint_entropy = calculate_shannon_entropy(endpoint)
+
+    # 2. Predict with CSIC 2010 Trained Machine Learning Model
+    is_ml_anomaly, ml_confidence = ml_classifier.predict_anomaly(method, endpoint, raw_log)
 
     is_anomaly = False
     threat_type = "NORMAL"
@@ -88,7 +92,7 @@ def analyze_log_entry(entry: LogEntry) -> dict:
                 rule_matched = f"SQL Injection pattern matched: {pattern}"
                 break
 
-    # Rule 3: Brute Force / Unauthorized Access (401 status code or sensitive endpoints)
+    # Rule 3: Brute Force / Unauthorized Access
     if not is_anomaly:
         if status_code == 401 or "/api/v1/auth" in endpoint:
             is_anomaly = True
@@ -111,6 +115,14 @@ def analyze_log_entry(entry: LogEntry) -> dict:
         mitre_id = "T1027"
         rule_matched = f"High Shannon entropy ({endpoint_entropy}) detected in URL endpoint"
 
+    # Rule 5: ML Model Detection Trigger (if rules didn't catch it but ML score > 0.85)
+    if not is_anomaly and is_ml_anomaly and ml_confidence > 0.85:
+        is_anomaly = True
+        threat_type = "ML_CLASSIFIED_ANOMALY"
+        severity = "HIGH"
+        mitre_id = "T1083"
+        rule_matched = f"CSIC 2010 Trained ML Model Flagged Anomaly (Confidence: {ml_confidence * 100:.1f}%)"
+
     # Record event into Episodic Memory chain if anomalous
     if is_anomaly:
         episodic_memory.add_event(
@@ -129,6 +141,7 @@ def analyze_log_entry(entry: LogEntry) -> dict:
         "user_agent": entry.user_agent,
         "raw_log": raw_log,
         "shannon_entropy": endpoint_entropy,
+        "ml_anomaly_prob": ml_confidence,
         "is_anomaly": is_anomaly,
         "threat_type": threat_type,
         "severity": severity,
