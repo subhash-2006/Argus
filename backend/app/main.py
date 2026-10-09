@@ -298,15 +298,18 @@ async def analyze_log_file(file: UploadFile = File(...)):
 
         analyses = []
         anomalies = []
+        ai_triage_count = 0
 
         for entry in entries:
             analysis = analyze_log_entry(entry)
             if analysis.get("is_anomaly"):
-                ai_triage = triage_incident_with_gemini(analysis)
+                force_fallback = (ai_triage_count >= 3)
+                ai_triage = triage_incident_with_gemini(analysis, force_fallback=force_fallback)
                 if ai_triage:
                     gemini_data = ai_triage.model_dump()
                     analysis["gemini_triage"] = gemini_data
                     analysis["mitre_id"] = gemini_data.get("mitre_technique_id", analysis.get("mitre_id"))
+                ai_triage_count += 1
 
                 if db is not None:
                     try:

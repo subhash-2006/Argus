@@ -1,11 +1,15 @@
 import os
 import random
+import time
 import concurrent.futures
 from typing import Optional
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from app.memory import get_semantic_threat_intel, get_procedural_playbook, episodic_memory
+
+# Global circuit breaker state to avoid repeated network calls when Gemini API returns 429/404/503
+_GEMINI_CIRCUIT_OPEN_UNTIL = 0.0
 
 class MitreDetail(BaseModel):
     id: str = Field(description="MITRE ATT&CK Technique ID e.g. T1110")
@@ -48,7 +52,8 @@ FIXED_MITRE_MAP = {
     "NORMAL": {"id": "N/A", "name": "Normal Traffic"}
 }
 
-def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageResult]:
+def triage_incident_with_gemini(incident_data: dict, force_fallback: bool = False) -> Optional[GeminiTriageResult]:
+    global _GEMINI_CIRCUIT_OPEN_UNTIL
     api_key = os.getenv("GEMINI_API_KEY", "")
     ip = incident_data.get("ip", "127.0.0.1")
     endpoint = incident_data.get("endpoint", "/server")
@@ -67,17 +72,21 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
     # Retrieve Procedural Playbook Ground-Truth
     playbook = get_procedural_playbook(mitre_id, ip)
 
-    prompt = (
-        f"You are a SOC DevSecOps Engineer. Triage the following incident:\n"
-        f"Incident Metadata: {incident_data}\n"
-        f"Episodic Memory Attack Chain: {active_timeline}\n"
-        f"MITRE Technique: {mitre_info}\n"
-        f"Procedural Playbook Rules: {playbook}\n\n"
-        f"Generate a dual-persona JSON triage report. Assign incident_id='{inc_id}'."
-    )
+    now = time.time()
+    circuit_is_active = (now < _GEMINI_CIRCUIT_OPEN_UNTIL)
 
-    if api_key and "your_" not in api_key:
+    if api_key and "your_" not in api_key and not force_fallback and not circuit_is_active:
+        prompt = (
+            f"You are a SOC DevSecOps Engineer. Triage the following incident:\n"
+            f"Incident Metadata: {incident_data}\n"
+            f"Episodic Memory Attack Chain: {active_timeline}\n"
+            f"MITRE Technique: {mitre_info}\n"
+            f"Procedural Playbook Rules: {playbook}\n\n"
+            f"Generate a dual-persona JSON triage report. Assign incident_id='{inc_id}'."
+        )
+
         def _call_gemini():
+            global _GEMINI_CIRCUIT_OPEN_UNTIL
             try:
                 client = genai.Client(api_key=api_key)
                 primary_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
@@ -98,6 +107,9 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
                 except Exception as m_err:
                     err_msg = str(m_err)
                     print(f"Gemini API warning ({primary_model}): {err_msg}. Using deterministic triage fallback.")
+                    if any(token in err_msg.upper() for token in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "404", "NOT_FOUND", "503", "UNAVAILABLE"]):
+                        _GEMINI_CIRCUIT_OPEN_UNTIL = time.time() + 300.0
+                        print(f"Gemini circuit breaker tripped until t={_GEMINI_CIRCUIT_OPEN_UNTIL}. Switching to instant deterministic triage.")
                     return None
             except Exception as e:
                 print(f"Gemini triage client exception: {e}")
@@ -106,11 +118,11 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_call_gemini)
-                res = future.result(timeout=2.0)
+                res = future.result(timeout=1.5)
                 if res:
                     return res
         except concurrent.futures.TimeoutError:
-            print("Gemini API call timed out after 2.0 seconds. Using deterministic triage fallback.")
+            print("Gemini API call timed out after 1.5s. Using deterministic triage fallback.")
         except Exception as e:
             print(f"Gemini triage API exception: {e}")
 

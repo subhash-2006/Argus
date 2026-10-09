@@ -277,7 +277,34 @@ class TestLogSentinelComprehensive(unittest.TestCase):
             self.assertIn("gemini_triage", data["anomalies"][0])
             print("[OK] File upload succeeds with 200 OK and AI fallback when Gemini returns 429")
 
+    def test_08_large_file_upload_speed(self):
+        """Verify bulk file upload with 50 anomalies completes in under 1 second without timing out"""
+        print("\n--- 8. Testing Large File Upload Speed & Bounded Execution ---")
+        import time
+
+        log_lines = []
+        for i in range(25):
+            log_lines.append(f"198.51.100.{i} - - [09/Oct/2026:07:20:00] \"GET /products?id=1%20UNION%20SELECT%201,2,password%20FROM%20users-- HTTP/1.1\" 500 2450")
+            log_lines.append(f"198.51.100.{i} - - [09/Oct/2026:07:20:05] \"POST /api/v1/auth HTTP/1.1\" 401 128")
+        
+        big_log = "\n".join(log_lines).encode("utf-8")
+        
+        start_ts = time.time()
+        response = self.client.post(
+            "/api/analyze-file",
+            files={"file": ("sample_access.log", big_log, "text/plain")}
+        )
+        duration = time.time() - start_ts
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["anomalies_count"], 50)
+        self.assertLess(duration, 1.5, f"Bulk upload took {duration:.2f}s, expected < 1.5s")
+        print(f"[OK] 50-anomaly bulk file upload completed in {duration:.3f}s (< 1.5s limit)")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
