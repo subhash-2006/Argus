@@ -23,9 +23,7 @@ import {
   Layers,
   Download,
   CheckCircle2,
-  AlertCircle,
-  Upload,
-  FileText
+  AlertCircle
 } from 'lucide-react';
 import { API_BASE, WS_URL } from './config/api';
 
@@ -343,61 +341,6 @@ const getLocalScenarioFallback = (scenarioNumber) => {
   return { success: true, scenario: scenarioNumber, events_generated: analyses.length, analyses };
 };
 
-// Client-side log file parser & threat analyzer fallback
-const parseAndAnalyzeLogClientSide = (filename, fileText) => {
-  const lines = fileText.split(/\r?\n/).filter(line => line.trim().length > 0);
-  const entries = [];
-  const anomalies = [];
-  const severitySummary = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
-  const threatCategories = new Set();
-
-  lines.forEach((line) => {
-    let ip = "127.0.0.1";
-    let method = "GET";
-    let endpoint = "/";
-    let status_code = 200;
-
-    const clfMatch = line.match(/^(\S+)\s+\S+\s+\S+\s+\[[^\]]+\]\s+"([A-Z]+)\s+(\S+)\s+HTTP\/[^"]+"\s+(\d{3})/);
-    if (clfMatch) {
-      ip = clfMatch[1];
-      method = clfMatch[2];
-      endpoint = clfMatch[3];
-      status_code = parseInt(clfMatch[4], 10);
-    } else {
-      const ipMatch = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
-      if (ipMatch) ip = ipMatch[0];
-      const mMatch = line.match(/\b(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\b/);
-      if (mMatch) method = mMatch[0];
-      const epMatch = line.match(/(\/[a-zA-Z0-9_\-\.\?%&=/]*)/);
-      if (epMatch) endpoint = epMatch[1];
-      const stMatch = line.match(/\b([1-5]\d{2})\b/);
-      if (stMatch) status_code = parseInt(stMatch[0], 10);
-    }
-
-    const item = analyzeSingleLogClientSide({ ip, method, endpoint, status_code, user_agent: "Uploaded Log File", raw_log: line });
-    entries.push(item);
-    if (item.is_anomaly) {
-      anomalies.push(item);
-      const sev = item.severity || "MEDIUM";
-      severitySummary[sev] = (severitySummary[sev] || 0) + 1;
-      if (item.threat_type) threatCategories.add(item.threat_type);
-    }
-  });
-
-  return {
-    success: true,
-    filename,
-    total_parsed: entries.length,
-    valid_entries: entries.length,
-    invalid_entries: 0,
-    anomalies_count: anomalies.length,
-    anomalies,
-    severity_summary: severitySummary,
-    threat_categories: Array.from(threatCategories),
-    message: `Successfully parsed ${entries.length} log entries. Detected ${anomalies.length} security anomalies.`
-  };
-};
-
 export default function App() {
   const [logs, setLogs] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -424,14 +367,7 @@ export default function App() {
     raw_log: '192.168.1.100 - - GET /.env HTTP/1.1 500'
   });
 
-  // File Upload & Analysis state
-  const [showUploadSection, setShowUploadSection] = useState(false);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [isAnalyzingFile, setIsAnalyzingFile] = useState(false);
-  const [fileAnalysisResults, setFileAnalysisResults] = useState(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
-
   const wsRef = useRef(null);
 
   // PDF Download Handler
@@ -464,92 +400,6 @@ export default function App() {
       alert(`Failed to download PDF incident report: ${err.message}`);
     } finally {
       setIsExportingPdf(false);
-    }
-  };
-
-  // Log File Upload Handlers
-  const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedFile(e.target.files[0]);
-      setFileAnalysisResults(null);
-    }
-  };
-
-  const handleDrag = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
-      setDragActive(true);
-    } else if (e.type === "dragleave") {
-      setDragActive(false);
-    }
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setSelectedFile(e.dataTransfer.files[0]);
-      setFileAnalysisResults(null);
-    }
-  };
-
-  const handleAnalyzeFile = async (e) => {
-    if (e) e.preventDefault();
-    if (!selectedFile) return;
-
-    setIsAnalyzingFile(true);
-    try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-
-      let data = null;
-      try {
-        const res = await fetch(`${API_BASE}/api/analyze-file`, {
-          method: 'POST',
-          body: formData
-        });
-
-        if (res.ok) {
-          data = await res.json();
-        } else {
-          const errData = await res.json().catch(() => ({}));
-          console.warn("Backend file analysis returned error, attempting local parser fallback:", errData);
-        }
-      } catch (netErr) {
-        console.warn("Backend network request failed/blocked, executing client log parser fallback:", netErr);
-      }
-
-      if (!data || !data.success) {
-        const fileText = await selectedFile.text();
-        data = parseAndAnalyzeLogClientSide(selectedFile.name, fileText);
-        data.message += " (Processed via Local Client Engine)";
-      }
-
-      setFileAnalysisResults(data);
-
-      if (data.anomalies && data.anomalies.length > 0) {
-        setIncidents((prev) => dedupeEvents([...data.anomalies, ...prev]).slice(0, 50));
-        setLogs((prev) => dedupeEvents([...data.anomalies, ...prev]).slice(0, 100));
-        setSelectedIncident(data.anomalies[0]);
-      }
-    } catch (err) {
-      console.error("File analysis error:", err);
-      try {
-        const fileText = await selectedFile.text();
-        const fallbackData = parseAndAnalyzeLogClientSide(selectedFile.name, fileText);
-        setFileAnalysisResults(fallbackData);
-        if (fallbackData.anomalies && fallbackData.anomalies.length > 0) {
-          setIncidents((prev) => dedupeEvents([...fallbackData.anomalies, ...prev]).slice(0, 50));
-          setLogs((prev) => dedupeEvents([...fallbackData.anomalies, ...prev]).slice(0, 100));
-          setSelectedIncident(fallbackData.anomalies[0]);
-        }
-      } catch (innerErr) {
-        alert(`File Analysis Error: ${err.message}`);
-      }
-    } finally {
-      setIsAnalyzingFile(false);
     }
   };
 
@@ -1029,17 +879,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Upload & Analyze Logs Action Button */}
-            <button
-              className="btn-primary"
-              onClick={() => setShowUploadSection(!showUploadSection)}
-              style={{ background: '#0284c7', borderColor: '#38bdf8' }}
-              aria-label="Toggle Upload and Analyze Logs Section"
-            >
-              <Upload size={14} />
-              Upload & Analyze Logs
-            </button>
-
             {/* Primary Action Button */}
             <button
               className="btn-primary"
@@ -1063,143 +902,6 @@ export default function App() {
           </div>
         </div>
       </header>
-
-      {/* Upload & Analyze Logs Panel */}
-      {(showUploadSection || fileAnalysisResults) && (
-        <div className="glass-panel" style={{ padding: '20px', marginBottom: '20px', border: '1px solid #0284c7' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-            <div>
-              <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Upload size={18} style={{ color: '#38bdf8' }} />
-                Upload & Analyze Log Files
-              </h3>
-              <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                Supported formats: <code>.log</code>, <code>.txt</code>, <code>.json</code>, <code>.jsonl</code>, <code>.ndjson</code>, <code>.csv</code> (Max 10MB)
-              </p>
-            </div>
-            <button
-              onClick={() => setShowUploadSection(false)}
-              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}
-            >
-              ✕
-            </button>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: fileAnalysisResults ? '1fr 1fr' : '1fr', gap: '20px' }}>
-            {/* Dropzone & File Selector */}
-            <div
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-              style={{
-                border: dragActive ? '2px dashed #38bdf8' : '2px dashed var(--border-color)',
-                background: dragActive ? 'rgba(56, 189, 248, 0.08)' : '#11151c',
-                borderRadius: '8px',
-                padding: '24px',
-                textAlign: 'center',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                transition: 'all 0.2s ease'
-              }}
-            >
-              <Upload size={32} style={{ color: selectedFile ? '#10b981' : '#38bdf8', marginBottom: '10px' }} />
-
-              {selectedFile ? (
-                <div style={{ marginBottom: '14px' }}>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-main)' }}>{selectedFile.name}</div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    Size: {(selectedFile.size / 1024).toFixed(1)} KB
-                  </div>
-                </div>
-              ) : (
-                <div style={{ marginBottom: '14px' }}>
-                  <div style={{ fontSize: '13px', color: 'var(--text-main)', fontWeight: 600 }}>
-                    Drag & Drop log file here or click to browse
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    Upload server access logs, JSON streams, or CSV datasets for AI security analysis
-                  </div>
-                </div>
-              )}
-
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                <label className="btn-secondary" style={{ cursor: 'pointer', fontSize: '12px', padding: '6px 14px' }}>
-                  Browse File
-                  <input
-                    type="file"
-                    accept=".log,.txt,.json,.jsonl,.ndjson,.csv"
-                    onChange={handleFileChange}
-                    style={{ display: 'none' }}
-                  />
-                </label>
-
-                {selectedFile && (
-                  <button
-                    className="btn-primary"
-                    onClick={handleAnalyzeFile}
-                    disabled={isAnalyzingFile}
-                    style={{ fontSize: '12px', padding: '6px 14px', background: '#0284c7', borderColor: '#38bdf8' }}
-                  >
-                    {isAnalyzingFile ? 'Analyzing Log Telemetry...' : 'Analyze Logs'}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Analysis Results View */}
-            {fileAnalysisResults && (
-              <div style={{ background: '#11151c', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '16px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <span style={{ fontSize: '13px', fontWeight: 700, color: '#10b981', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <CheckCircle2 size={16} /> Analysis Completed
-                  </span>
-                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{fileAnalysisResults.filename}</span>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', marginBottom: '12px', textAlign: 'center' }}>
-                  <div style={{ background: '#1e2430', padding: '8px', borderRadius: '4px' }}>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Parsed</div>
-                    <div className="mono" style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-main)' }}>{fileAnalysisResults.total_parsed}</div>
-                  </div>
-                  <div style={{ background: '#1e2430', padding: '8px', borderRadius: '4px' }}>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Valid</div>
-                    <div className="mono" style={{ fontSize: '16px', fontWeight: 700, color: '#10b981' }}>{fileAnalysisResults.valid_entries}</div>
-                  </div>
-                  <div style={{ background: '#1e2430', padding: '8px', borderRadius: '4px' }}>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Invalid</div>
-                    <div className="mono" style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-muted)' }}>{fileAnalysisResults.invalid_entries}</div>
-                  </div>
-                  <div style={{ background: '#1e2430', padding: '8px', borderRadius: '4px' }}>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Anomalies</div>
-                    <div className="mono" style={{ fontSize: '16px', fontWeight: 700, color: '#f59e0b' }}>{fileAnalysisResults.anomalies_count}</div>
-                  </div>
-                </div>
-
-                <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '14px', lineHeight: '1.5' }}>
-                  {fileAnalysisResults.message}
-                </p>
-
-                {fileAnalysisResults.anomalies_count > 0 && (
-                  <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                    <button
-                      className="btn-primary"
-                      onClick={() => handleDownloadPdf(fileAnalysisResults.anomalies[0])}
-                      disabled={isExportingPdf}
-                      style={{ fontSize: '12px', padding: '6px 12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                    >
-                      <FileText size={14} />
-                      {isExportingPdf ? 'Generating PDF...' : 'Export PDF Report'}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Metric Cards Row */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px', marginBottom: '20px' }}>
