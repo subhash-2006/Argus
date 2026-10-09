@@ -89,7 +89,7 @@ def triage_incident_with_gemini(incident_data: dict, force_fallback: bool = Fals
             global _GEMINI_CIRCUIT_OPEN_UNTIL
             try:
                 client = genai.Client(api_key=api_key)
-                primary_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+                primary_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
                 try:
                     response = client.models.generate_content(

@@ -18,12 +18,12 @@ try:
     from app.engine import LogEntry, analyze_log_entry
     from app.gemini_triage import triage_incident_with_gemini
     from app.log_parser import parse_uploaded_file
-    from app.pdf_generator import generate_incident_pdf
+    from app.pdf_generator import generate_incident_pdf, generate_summary_pdf
 except (ImportError, ModuleNotFoundError):
     from .engine import LogEntry, analyze_log_entry
     from .gemini_triage import triage_incident_with_gemini
     from .log_parser import parse_uploaded_file
-    from .pdf_generator import generate_incident_pdf
+    from .pdf_generator import generate_incident_pdf, generate_summary_pdf
 
 
 load_dotenv()
@@ -254,6 +254,20 @@ async def export_incident_pdf_post(incident_data: dict):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate PDF report: {str(e)}")
+
+@app.post("/api/export/summary-pdf")
+async def export_summary_pdf_post(payload: dict):
+    incidents = payload.get("incidents", [])
+    try:
+        pdf_bytes = generate_summary_pdf(incidents)
+        timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=log-sentinel-summary-{timestamp_slug}.pdf"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate summary PDF report: {str(e)}")
 
 @app.post("/api/analyze-file")
 async def analyze_log_file(file: UploadFile = File(...)):

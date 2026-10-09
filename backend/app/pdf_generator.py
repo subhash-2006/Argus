@@ -395,3 +395,185 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
     doc.build(story, canvasmaker=NumberedCanvas)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def generate_summary_pdf(incidents: List[Dict[str, Any]]) -> bytes:
+    """
+    Generates a professional multi-incident summary PDF report.
+    Returns raw PDF bytes.
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=40,
+        bottomMargin=45
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'SummaryDocTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#0F172A")
+    )
+    subtitle_style = ParagraphStyle(
+        'SummaryDocSubtitle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#3B82F6")
+    )
+    section_heading = ParagraphStyle(
+        'SummarySectionHeading',
+        parent=styles['Heading2'],
+        fontName='Helvetica-Bold',
+        fontSize=12,
+        leading=16,
+        textColor=colors.HexColor("#1E293B"),
+        spaceBefore=12,
+        spaceAfter=6,
+        keepWithNext=True
+    )
+    body_style = ParagraphStyle(
+        'SummaryBodyDark',
+        parent=styles['BodyText'],
+        fontName='Helvetica',
+        fontSize=9,
+        leading=13,
+        textColor=colors.HexColor("#334155")
+    )
+    table_cell_style = ParagraphStyle(
+        'SummaryTableCell',
+        fontName='Helvetica',
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#1E293B")
+    )
+    table_cell_header = ParagraphStyle(
+        'SummaryTableCellHeader',
+        fontName='Helvetica-Bold',
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#FFFFFF")
+    )
+
+    story = []
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    story.append(Paragraph("LOG SENTINEL | AI SECURITY OPERATIONS CENTER", subtitle_style))
+    story.append(Spacer(1, 2))
+    story.append(Paragraph("Executive Incident Summary Report", title_style))
+    story.append(Spacer(1, 4))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#0F172A"), spaceBefore=2, spaceAfter=8))
+
+    incidents_list = incidents or []
+    total_inc = len(incidents_list)
+
+    # Severity Counts
+    sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    threat_types = set()
+    attacker_ips = set()
+
+    for inc in incidents_list:
+        sev = (inc.get("severity") or "MEDIUM").upper()
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        if inc.get("threat_type"):
+            threat_types.add(inc.get("threat_type"))
+        if inc.get("ip"):
+            attacker_ips.add(inc.get("ip"))
+
+    # Overview Table
+    summary_meta = [
+        [
+            Paragraph("<b>Generated At:</b>", table_cell_style),
+            Paragraph(now_str, table_cell_style),
+            Paragraph("<b>Total Incidents:</b>", table_cell_style),
+            Paragraph(f"<b>{total_inc}</b>", table_cell_style),
+        ],
+        [
+            Paragraph("<b>Critical Threats:</b>", table_cell_style),
+            Paragraph(f"<font color='#DC2626'><b>{sev_counts['CRITICAL']}</b></font>", table_cell_style),
+            Paragraph("<b>High Threats:</b>", table_cell_style),
+            Paragraph(f"<font color='#EA580C'><b>{sev_counts['HIGH']}</b></font>", table_cell_style),
+        ],
+        [
+            Paragraph("<b>Medium / Low Threats:</b>", table_cell_style),
+            Paragraph(f"{sev_counts['MEDIUM']} Medium, {sev_counts['LOW']} Low", table_cell_style),
+            Paragraph("<b>Unique Attacker IPs:</b>", table_cell_style),
+            Paragraph(str(len(attacker_ips)), table_cell_style),
+        ]
+    ]
+
+    t_meta = Table(summary_meta, colWidths=[120, 150, 120, 150])
+    t_meta.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ('PADDING', (0, 0), (-1, -1), 5),
+    ]))
+    story.append(t_meta)
+    story.append(Spacer(1, 10))
+
+    # Incident List Table
+    story.append(Paragraph("Incident Telemetry Summary", section_heading))
+    
+    if not incidents_list:
+        story.append(Paragraph("<i>No active security incidents recorded in this reporting window. All system telemetry operating normally.</i>", body_style))
+    else:
+        table_headers = [
+            Paragraph("Incident ID", table_cell_header),
+            Paragraph("Timestamp", table_cell_header),
+            Paragraph("IP Address", table_cell_header),
+            Paragraph("Threat Category", table_cell_header),
+            Paragraph("Severity", table_cell_header),
+            Paragraph("Target Endpoint", table_cell_header)
+        ]
+        inc_rows = [table_headers]
+
+        for inc in incidents_list[:30]:  # Up to 30 incidents in summary report
+            inc_id = inc.get("incident_id") or "INC-LOG"
+            ts = inc.get("timestamp") or "N/A"
+            ts_clean = ts.replace("T", " ")[:19]
+            ip = inc.get("ip") or "127.0.0.1"
+            threat = inc.get("threat_type") or "ANOMALY"
+            sev = (inc.get("severity") or "MEDIUM").upper()
+            ep = inc.get("endpoint") or "/"
+            sev_c = get_severity_color(sev)
+
+            inc_rows.append([
+                Paragraph(inc_id, table_cell_style),
+                Paragraph(ts_clean, table_cell_style),
+                Paragraph(ip, table_cell_style),
+                Paragraph(threat.replace("_", " "), table_cell_style),
+                Paragraph(f"<font color='{sev_c.hexval()}'><b>{sev}</b></font>", table_cell_style),
+                Paragraph(f"<code>{ep[:25]}</code>", table_cell_style)
+            ])
+
+        t_incidents = Table(inc_rows, colWidths=[80, 95, 80, 105, 55, 125])
+        t_incidents.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E293B")),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor("#FFFFFF"), colors.HexColor("#F8FAFC")]),
+            ('PADDING', (0, 0), (-1, -1), 4),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        story.append(t_incidents)
+
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("Recommended Action Plan", section_heading))
+    story.append(Paragraph(
+        "1. Block persistent attacker IPs at reverse proxy and firewall layers.<br/>"
+        "2. Review target endpoints flagged with SQL Injection or Honeytoken access.<br/>"
+        "3. Deploy patched application builds and rate-limiting rules.", body_style
+    ))
+
+    doc.build(story, canvasmaker=NumberedCanvas)
+    buffer.seek(0)
+    return buffer.getvalue()
+

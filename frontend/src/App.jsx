@@ -24,7 +24,10 @@ import {
   Download,
   CheckCircle2,
   AlertCircle,
-  FileText
+  FileText,
+  Upload,
+  File,
+  RefreshCw
 } from 'lucide-react';
 import { API_BASE, WS_URL } from './config/api';
 
@@ -342,6 +345,62 @@ const getLocalScenarioFallback = (scenarioNumber) => {
   return { success: true, scenario: scenarioNumber, events_generated: analyses.length, analyses };
 };
 
+// Client-side log file parser & threat analyzer fallback
+const parseAndAnalyzeLogClientSide = (filename, fileText) => {
+  const lines = fileText.split(/\r?\n/).filter(line => line.trim().length > 0);
+  const entries = [];
+  const anomalies = [];
+  const severitySummary = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+  const threatCategories = new Set();
+
+  lines.forEach((line) => {
+    let ip = "127.0.0.1";
+    let method = "GET";
+    let endpoint = "/";
+    let status_code = 200;
+
+    const clfMatch = line.match(/^(\S+)\s+\S+\s+\S+\s+\[[^\]]+\]\s+"([A-Z]+)\s+(\S+)\s+HTTP\/[^"]+"\s+(\d{3})/);
+    if (clfMatch) {
+      ip = clfMatch[1];
+      method = clfMatch[2];
+      endpoint = clfMatch[3];
+      status_code = parseInt(clfMatch[4], 10);
+    } else {
+      const ipMatch = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+      if (ipMatch) ip = ipMatch[0];
+      const mMatch = line.match(/\b(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\b/);
+      if (mMatch) method = mMatch[0];
+      const epMatch = line.match(/(\/[a-zA-Z0-9_\-\.\?%&=/]*)/);
+      if (epMatch) endpoint = epMatch[1];
+      const stMatch = line.match(/\b([1-5]\d{2})\b/);
+      if (stMatch) status_code = parseInt(stMatch[0], 10);
+    }
+
+    const item = analyzeSingleLogClientSide({ ip, method, endpoint, status_code, user_agent: "Uploaded Log File", raw_log: line });
+    entries.push(item);
+    if (item.is_anomaly) {
+      anomalies.push(item);
+      const sev = item.severity || "MEDIUM";
+      severitySummary[sev] = (severitySummary[sev] || 0) + 1;
+      if (item.threat_type) threatCategories.add(item.threat_type);
+    }
+  });
+
+  return {
+    success: true,
+    filename,
+    total_parsed: entries.length,
+    valid_entries: entries.length,
+    invalid_entries: 0,
+    anomalies_count: anomalies.length,
+    anomalies,
+    severity_summary: severitySummary,
+    threat_categories: Array.from(threatCategories),
+    is_local_fallback: true,
+    message: `Successfully parsed ${entries.length} log entries locally. Detected ${anomalies.length} security anomalies.`
+  };
+};
+
 export default function App() {
   const [logs, setLogs] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -369,7 +428,133 @@ export default function App() {
   });
 
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isExportingSummaryPdf, setIsExportingSummaryPdf] = useState(false);
+
+  // File Upload state
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [isAnalyzingFile, setIsAnalyzingFile] = useState(false);
+  const [fileAnalysisResults, setFileAnalysisResults] = useState(null);
+  const [fileAnalysisError, setFileAnalysisError] = useState(null);
+  const fileInputRef = useRef(null);
   const wsRef = useRef(null);
+
+  const formatFileSize = (bytes) => {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
+  const handleFileSelect = (e) => {
+    const file = e.target.files ? e.target.files[0] : null;
+    if (!file) return;
+
+    if (file.size > 10 * 1024 * 1024) {
+      setFileAnalysisError("File size exceeds maximum limit of 10MB");
+      setSelectedFile(null);
+      return;
+    }
+
+    setFileAnalysisError(null);
+    setFileAnalysisResults(null);
+    setSelectedFile(file);
+  };
+
+  const handleAnalyzeFile = async () => {
+    if (!selectedFile) return;
+
+    if (selectedFile.size > 10 * 1024 * 1024) {
+      setFileAnalysisError("File size exceeds maximum limit of 10MB");
+      return;
+    }
+
+    setIsAnalyzingFile(true);
+    setFileAnalysisError(null);
+    setFileAnalysisResults(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+
+      let data = null;
+      try {
+        const res = await fetch(`${API_BASE}/api/analyze-file`, {
+          method: 'POST',
+          body: formData
+        });
+
+        if (res.ok) {
+          data = await res.json();
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          console.warn("Backend file analysis returned error, triggering client log engine fallback:", errData);
+        }
+      } catch (netErr) {
+        console.warn("Backend file analysis network call failed/blocked, executing client log engine fallback:", netErr);
+      }
+
+      if (!data || !data.success) {
+        const fileText = await selectedFile.text();
+        data = parseAndAnalyzeLogClientSide(selectedFile.name, fileText);
+      }
+
+      setFileAnalysisResults(data);
+
+      if (data.anomalies && data.anomalies.length > 0) {
+        setIncidents((prev) => dedupeEvents([...data.anomalies, ...prev]).slice(0, 50));
+        setLogs((prev) => dedupeEvents([...data.anomalies, ...prev]).slice(0, 100));
+        setSelectedIncident(data.anomalies[0]);
+      }
+    } catch (err) {
+      console.error("File analysis error:", err);
+      try {
+        const fileText = await selectedFile.text();
+        const fallbackData = parseAndAnalyzeLogClientSide(selectedFile.name, fileText);
+        setFileAnalysisResults(fallbackData);
+        if (fallbackData.anomalies && fallbackData.anomalies.length > 0) {
+          setIncidents((prev) => dedupeEvents([...fallbackData.anomalies, ...prev]).slice(0, 50));
+          setLogs((prev) => dedupeEvents([...fallbackData.anomalies, ...prev]).slice(0, 100));
+          setSelectedIncident(fallbackData.anomalies[0]);
+        }
+      } catch (innerErr) {
+        setFileAnalysisError(err.message || "Failed to analyze log file");
+      }
+    } finally {
+      setIsAnalyzingFile(false);
+    }
+  };
+
+  const handleDownloadSummaryPdf = async () => {
+    setIsExportingSummaryPdf(true);
+    try {
+      const payload = { incidents: incidents.length > 0 ? incidents : logs.filter(l => l.is_anomaly) };
+      const response = await fetch(`${API_BASE}/api/export/summary-pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Summary PDF generation failed (${response.status})`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `log-sentinel-summary-${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Summary PDF export error:", err);
+      alert(`Failed to download Summary PDF report: ${err.message}`);
+    } finally {
+      setIsExportingSummaryPdf(false);
+    }
+  };
 
   // PDF Download Handler
   const handleDownloadPdf = async (incident) => {
@@ -914,6 +1099,19 @@ export default function App() {
               Manual Log Ingest
             </button>
 
+            {/* Export Summary PDF Button */}
+            <button
+              className="btn-secondary"
+              onClick={handleDownloadSummaryPdf}
+              disabled={isExportingSummaryPdf}
+              style={{ fontSize: '12px', padding: '6px 12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+              title="Download Summary PDF Report of All Current Incidents"
+              aria-label="Export Summary PDF Incident Report"
+            >
+              <Download size={13} />
+              {isExportingSummaryPdf ? 'Exporting PDF...' : 'Export Summary PDF'}
+            </button>
+
             {/* Quiet Clear Data Action Button */}
             <button
               className="btn-secondary"
@@ -964,6 +1162,94 @@ export default function App() {
             {typeof animAvgEntropy === 'number' ? animAvgEntropy.toFixed(2) : animAvgEntropy}
           </div>
         </div>
+      </div>
+
+      {/* Log File Ingestion & Analysis Panel */}
+      <div className="glass-panel" style={{ padding: '16px 20px', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Upload size={16} color="#3b82f6" />
+            <h3 style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-main)', margin: 0 }}>
+              Ingest & Analyze Log File
+            </h3>
+            <span style={{ fontSize: '11px', color: 'var(--text-muted)', background: '#1e2430', padding: '2px 8px', borderRadius: '4px', border: '1px solid var(--border-color)' }}>
+              Formats: .log, .txt, .json, .jsonl, .ndjson, .csv (Max 10MB)
+            </span>
+          </div>
+
+          {selectedFile && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '12px', color: '#10b981', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <File size={13} />
+                {selectedFile.name} ({formatFileSize(selectedFile.size)})
+              </span>
+              <button
+                onClick={() => { setSelectedFile(null); setFileAnalysisResults(null); setFileAnalysisError(null); }}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '14px' }}
+                title="Clear selected file"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileSelect}
+            accept=".log,.txt,.json,.jsonl,.ndjson,.csv"
+            style={{ display: 'none' }}
+          />
+
+          <button
+            className="btn-secondary"
+            onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            disabled={isAnalyzingFile}
+            style={{ fontSize: '12px', padding: '6px 14px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+          >
+            <FileText size={14} />
+            {selectedFile ? 'Change Log File' : 'Select Log File'}
+          </button>
+
+          <button
+            className="btn-primary"
+            onClick={handleAnalyzeFile}
+            disabled={!selectedFile || isAnalyzingFile}
+            style={{ fontSize: '12px', padding: '6px 16px', display: 'inline-flex', alignItems: 'center', gap: '6px', opacity: (!selectedFile || isAnalyzingFile) ? 0.6 : 1 }}
+          >
+            <Cpu size={14} />
+            {isAnalyzingFile ? 'Analyzing Log Telemetry...' : 'Analyze Logs'}
+          </button>
+        </div>
+
+        {/* File Analysis Status Feedback Banner */}
+        {fileAnalysisError && (
+          <div style={{ marginTop: '12px', padding: '8px 12px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', borderRadius: '6px', color: '#f87171', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <AlertCircle size={14} />
+            <span>{fileAnalysisError}</span>
+          </div>
+        )}
+
+        {fileAnalysisResults && (
+          <div style={{ marginTop: '12px', padding: '10px 14px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid #10b981', borderRadius: '6px', color: '#34d399', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <CheckCircle2 size={14} />
+              <span>
+                {fileAnalysisResults.message || `Successfully analyzed ${fileAnalysisResults.filename}`}
+              </span>
+              {fileAnalysisResults.is_local_fallback && (
+                <span style={{ fontSize: '10px', background: '#1e2430', color: '#fbbf24', border: '1px solid #d97706', padding: '1px 6px', borderRadius: '4px', fontWeight: 600 }}>
+                  Processed via Local Client Engine (WAF / Fallback)
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+              Parsed: <b>{fileAnalysisResults.total_parsed || fileAnalysisResults.valid_entries}</b> | Anomalies: <b>{fileAnalysisResults.anomalies_count}</b>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main Grid: Telemetry Table + Inspector Panel */}

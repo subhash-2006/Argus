@@ -177,6 +177,20 @@ class TestLogSentinelComprehensive(unittest.TestCase):
         self.assertEqual(response_get.headers["content-type"], "application/pdf")
         print("[OK] PDF generated successfully via GET /api/incidents/{id}/pdf")
 
+        # Test POST Summary PDF export with incidents
+        response_summary = self.client.post("/api/export/summary-pdf", json={"incidents": [real_incident]})
+        self.assertEqual(response_summary.status_code, 200)
+        self.assertEqual(response_summary.headers["content-type"], "application/pdf")
+        self.assertTrue(response_summary.content.startswith(b"%PDF"))
+        print("[OK] Summary PDF generated successfully via POST /api/export/summary-pdf")
+
+        # Test POST Summary PDF export with empty incident list
+        response_empty_summary = self.client.post("/api/export/summary-pdf", json={"incidents": []})
+        self.assertEqual(response_empty_summary.status_code, 200)
+        self.assertEqual(response_empty_summary.headers["content-type"], "application/pdf")
+        self.assertTrue(response_empty_summary.content.startswith(b"%PDF"))
+        print("[OK] Empty list Summary PDF generated successfully via POST /api/export/summary-pdf")
+
     def test_05_frontend_backend_api_routes(self):
         """Verify API endpoints used by frontend work cleanly"""
         print("\n--- 5. Testing Frontend-Backend API Integration ---")
