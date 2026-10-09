@@ -25,9 +25,7 @@ import {
   CheckCircle2,
   AlertCircle
 } from 'lucide-react';
-
-const API_BASE = 'http://127.0.0.1:8000';
-const WS_URL = 'ws://127.0.0.1:8000/ws/alerts';
+import { API_BASE, WS_URL } from './config/api';
 
 // Strict IP Address Validation Regex (IPv4 and IPv6)
 const IPV4_REGEX = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
