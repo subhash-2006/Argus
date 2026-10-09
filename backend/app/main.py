@@ -76,15 +76,23 @@ raw_allowed_origins = os.getenv(
     "ALLOWED_ORIGINS",
     "https://log-sentinel-frontend.onrender.com,http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:4173,http://127.0.0.1:4173"
 )
-allowed_origins = [origin.strip() for origin in raw_allowed_origins.split(",") if origin.strip()]
+allowed_origins_set = set()
+for item in raw_allowed_origins.split(","):
+    clean = item.strip().rstrip("/")
+    if clean:
+        allowed_origins_set.add(clean)
+        allowed_origins_set.add(f"{clean}/")
+
+allowed_origins = list(allowed_origins_set)
 
 app = FastAPI(title="Log Sentinel API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*\.onrender\.com",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS", "PUT", "PATCH"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -291,7 +299,10 @@ async def analyze_log_file(file: UploadFile = File(...)):
                     print(f"Mongo incident insert error: {err}")
 
             anomalies.append(analysis)
-            await manager.broadcast(analysis)
+            try:
+                await manager.broadcast(analysis)
+            except Exception as b_err:
+                print(f"WebSocket broadcast error during file analysis: {b_err}")
         else:
             if db is not None:
                 try:

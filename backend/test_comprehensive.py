@@ -199,6 +199,33 @@ class TestLogSentinelComprehensive(unittest.TestCase):
         self.assertTrue(res_sim.json()["success"])
         print("[OK] POST /api/simulate returned 200 OK")
 
+    def test_06_cors_preflight_headers(self):
+        """Verify OPTIONS preflight CORS response headers for all API endpoints"""
+        print("\n--- 6. Testing CORS Preflight OPTIONS Headers ---")
+        headers = {
+            "Origin": "https://log-sentinel-frontend.onrender.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type"
+        }
+
+        endpoints = [
+            "/api/analyze-file",
+            "/api/simulate",
+            "/api/incidents",
+            "/api/export/pdf",
+            "/health"
+        ]
+
+        for ep in endpoints:
+            res = self.client.options(ep, headers=headers)
+            self.assertEqual(res.status_code, 200, f"Preflight failed for {ep}")
+            self.assertEqual(
+                res.headers.get("access-control-allow-origin"),
+                "https://log-sentinel-frontend.onrender.com",
+                f"Missing Access-Control-Allow-Origin header on {ep}"
+            )
+            print(f"[OK] Preflight OPTIONS passed for {ep}")
+
 
 if __name__ == "__main__":
     unittest.main()
