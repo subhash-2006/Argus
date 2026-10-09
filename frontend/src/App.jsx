@@ -23,7 +23,8 @@ import {
   Layers,
   Download,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  FileText
 } from 'lucide-react';
 import { API_BASE, WS_URL } from './config/api';
 
@@ -440,9 +441,12 @@ export default function App() {
     }
   };
 
-  // Connect WebSocket
+  // Connect WebSocket & set up fallback polling
   useEffect(() => {
     fetchHealthAndIncidents();
+
+    let reconnectTimer = null;
+    let isMounted = true;
 
     const connectWS = () => {
       try {
@@ -450,10 +454,11 @@ export default function App() {
         wsRef.current = ws;
 
         ws.onopen = () => {
-          setWsConnected(true);
+          if (isMounted) setWsConnected(true);
         };
 
         ws.onmessage = (event) => {
+          if (!isMounted) return;
           try {
             const data = JSON.parse(event.data);
             setLogs((prev) => dedupeEvents([data, ...prev]).slice(0, 100));
@@ -461,27 +466,47 @@ export default function App() {
               setIncidents((prev) => dedupeEvents([data, ...prev]).slice(0, 50));
             }
           } catch (err) {
-            console.error("WS Parse error:", err);
+            console.warn("WS Message Parse warning:", err);
           }
         };
 
         ws.onclose = () => {
+          if (!isMounted) return;
           setWsConnected(false);
-          setTimeout(connectWS, 3000);
+          reconnectTimer = setTimeout(connectWS, 5000);
         };
 
-        ws.onerror = () => {
+        ws.onerror = (err) => {
+          if (!isMounted) return;
+          console.warn("WebSocket connection notice: live stream disconnected, falling back to polling.", err);
           setWsConnected(false);
         };
       } catch (err) {
-        setWsConnected(false);
+        if (isMounted) {
+          console.warn("WebSocket initialization notice:", err);
+          setWsConnected(false);
+        }
       }
     };
 
     connectWS();
 
+    // Fallback polling interval every 10 seconds to keep incidents updated even if WS fails
+    const pollInterval = setInterval(() => {
+      if (isMounted) {
+        fetchHealthAndIncidents();
+      }
+    }, 10000);
+
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      isMounted = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearInterval(pollInterval);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+      }
     };
   }, []);
 
