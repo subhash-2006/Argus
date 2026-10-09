@@ -7,3 +7,5 @@ scikit-learn
 numpy
 pydantic
 python-dotenv
+reportlab
+python-multipart

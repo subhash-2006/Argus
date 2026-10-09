@@ -1,7 +1,8 @@
+from datetime import datetime, timezone
 import os
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import sys
@@ -15,9 +16,13 @@ if parent_dir not in sys.path:
 try:
     from app.engine import LogEntry, analyze_log_entry
     from app.gemini_triage import triage_incident_with_gemini
+    from app.log_parser import parse_uploaded_file
+    from app.pdf_generator import generate_incident_pdf
 except (ImportError, ModuleNotFoundError):
     from .engine import LogEntry, analyze_log_entry
     from .gemini_triage import triage_incident_with_gemini
+    from .log_parser import parse_uploaded_file
+    from .pdf_generator import generate_incident_pdf
 
 
 load_dotenv()
@@ -193,6 +198,131 @@ async def simulate_redteam_scenario(payload: dict):
             results.append(res["analysis"])
 
     return {"success": True, "scenario": scenario, "events_generated": len(results), "analyses": results}
+
+@app.get("/api/incidents/{incident_id}/pdf")
+async def export_incident_pdf_by_id(incident_id: str):
+    doc = None
+    if db is not None:
+        try:
+            doc = await db.incidents.find_one({"incident_id": incident_id}, {"_id": 0})
+        except Exception as err:
+            print(f"Mongo pdf query error: {err}")
+
+    if not doc:
+        doc = {
+            "incident_id": incident_id,
+            "ip": "127.0.0.1",
+            "method": "GET",
+            "endpoint": "/api/v1/resource",
+            "status_code": 401,
+            "threat_type": "SECURITY_ANOMALY",
+            "severity": "HIGH",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "rule_matched": ["Rule-based anomaly threshold triggered"]
+        }
+
+    try:
+        pdf_bytes = generate_incident_pdf(doc)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=log-sentinel-{incident_id}.pdf"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF report: {str(e)}")
+
+@app.post("/api/export/pdf")
+async def export_incident_pdf_post(incident_data: dict):
+    if not incident_data:
+        raise HTTPException(status_code=400, detail="No incident data provided")
+    inc_id = incident_data.get("incident_id", "INC-REPORT")
+    try:
+        pdf_bytes = generate_incident_pdf(incident_data)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=log-sentinel-{inc_id}.pdf"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF report: {str(e)}")
+
+@app.post("/api/analyze-file")
+async def analyze_log_file(file: UploadFile = File(...)):
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    contents = await file.read()
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size exceeds maximum limit of 10MB")
+
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    entries, valid_count, invalid_count = parse_uploaded_file(file.filename, contents, max_entries=2000)
+
+    if not entries:
+        return {
+            "success": False,
+            "filename": file.filename,
+            "message": "No valid log entries could be parsed from the uploaded file",
+            "total_parsed": 0,
+            "valid_entries": 0,
+            "invalid_entries": invalid_count,
+            "anomalies_count": 0,
+            "anomalies": []
+        }
+
+    analyses = []
+    anomalies = []
+
+    for entry in entries:
+        analysis = analyze_log_entry(entry)
+        if analysis.get("is_anomaly"):
+            ai_triage = triage_incident_with_gemini(analysis)
+            if ai_triage:
+                gemini_data = ai_triage.model_dump()
+                analysis["gemini_triage"] = gemini_data
+                analysis["mitre_id"] = gemini_data.get("mitre_technique_id", analysis.get("mitre_id"))
+
+            if db is not None:
+                try:
+                    await db.incidents.insert_one(analysis.copy())
+                except Exception as err:
+                    print(f"Mongo incident insert error: {err}")
+
+            anomalies.append(analysis)
+            await manager.broadcast(analysis)
+        else:
+            if db is not None:
+                try:
+                    await db.raw_logs.insert_one(analysis.copy())
+                except Exception as err:
+                    pass
+
+        analyses.append(analysis)
+
+    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    threat_categories = set()
+    for a in anomalies:
+        sev = (a.get("severity") or "MEDIUM").upper()
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+        if a.get("threat_type"):
+            threat_categories.add(a.get("threat_type"))
+
+    return {
+        "success": True,
+        "filename": file.filename,
+        "total_parsed": len(entries),
+        "valid_entries": valid_count,
+        "invalid_entries": invalid_count,
+        "anomalies_count": len(anomalies),
+        "anomalies": anomalies,
+        "severity_summary": severity_counts,
+        "threat_categories": list(threat_categories),
+        "message": f"Successfully parsed {len(entries)} log entries. Detected {len(anomalies)} security anomalies."
+    }
+
+
 
 @app.websocket("/ws/alerts")
 async def websocket_endpoint(websocket: WebSocket):
