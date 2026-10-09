@@ -78,41 +78,41 @@ def triage_incident_with_gemini(incident_data: dict) -> Optional[GeminiTriageRes
 
     if api_key and "your_" not in api_key:
         def _call_gemini():
-            client = genai.Client(api_key=api_key)
-            models_to_try = [
-                "gemini-3.8-flash",
-                "gemini-2.5-flash",
-                "gemini-2.0-flash-exp"
-            ]
+            try:
+                client = genai.Client(api_key=api_key)
+                models_to_try = ["gemini-3.8-flash"]
 
-            for model_name in models_to_try:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=GeminiTriageResult,
-                        ),
-                    )
-                    if response and response.text:
-                        parsed = GeminiTriageResult.model_validate_json(response.text)
-                        # Guarantee same incident_id UUID
-                        parsed.incident_id = inc_id
-                        return parsed
-                except Exception as m_err:
-                    print(f"Gemini model {model_name} warning: {m_err}")
-                    continue
+                for model_name in models_to_try:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=GeminiTriageResult,
+                            ),
+                        )
+                        if response and response.text:
+                            parsed = GeminiTriageResult.model_validate_json(response.text)
+                            parsed.incident_id = inc_id
+                            return parsed
+                    except Exception as m_err:
+                        err_msg = str(m_err)
+                        print(f"Gemini model {model_name} warning: {err_msg}")
+                        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
+                            break
+            except Exception as e:
+                print(f"Gemini triage client exception: {e}")
             return None
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_call_gemini)
-                res = future.result(timeout=4.0)
+                res = future.result(timeout=2.0)
                 if res:
                     return res
         except concurrent.futures.TimeoutError:
-            print("Gemini API call timed out after 4 seconds. Returning fallback triage.")
+            print("Gemini API call timed out after 2 seconds. Returning fallback triage.")
         except Exception as e:
             print(f"Gemini triage API exception: {e}")
 
