@@ -116,14 +116,74 @@ def analyze_log_entry(entry: LogEntry) -> dict:
             rules_matched.append(f"XSS pattern matched: {pattern}")
             break
 
-    # Rule 3: Brute Force / Unauthorized Access
-    if status_code == 401 or "/api/v1/auth" in endpoint:
+    # Rule 2.7: Privilege Escalation Detection
+    priv_esc_patterns = [
+        r"(?i)\bprivilege[-_ ]escalation\b",
+        r"(?i)\bunauthorized\s+sudo\b",
+        r"(?i)\bsudoers\b",
+        r"(?i)\bpolkit\b",
+        r"(?i)\bsetuid\b",
+        r"(?i)\brole[-_ ]escalation\b",
+        r"(?i)\bsu\s+root\b"
+    ]
+    for pattern in priv_esc_patterns:
+        if re.search(pattern, raw_log) or re.search(pattern, endpoint):
+            is_anomaly = True
+            if threat_type == "NORMAL":
+                threat_type = "PRIVILEGE_ESCALATION"
+                severity = "CRITICAL"
+                mitre_id = "T1548"
+            rules_matched.append(f"Privilege escalation indicator matched: {pattern}")
+            break
+
+    # Rule 2.8: Rate Limit / High Request Rate Abuse
+    rate_abuse_patterns = [
+        r"(?i)\bhigh\s+request\s+rate\b",
+        r"(?i)\brate\s+limit\b",
+        r"(?i)\btoo\s+many\s+requests\b",
+        r"(?i)\brequest\s+rate\s+exceeded\b"
+    ]
+    if status_code == 429:
+        is_anomaly = True
+        if threat_type == "NORMAL":
+            threat_type = "RATE_LIMIT_ABUSE"
+            severity = "HIGH"
+            mitre_id = "T1499"
+        rules_matched.append(f"HTTP 429 Rate limit / High request volume detected for {endpoint}")
+    else:
+        for pattern in rate_abuse_patterns:
+            if re.search(pattern, raw_log) or re.search(pattern, endpoint):
+                is_anomaly = True
+                if threat_type == "NORMAL":
+                    threat_type = "RATE_LIMIT_ABUSE"
+                    severity = "HIGH"
+                    mitre_id = "T1499"
+                rules_matched.append(f"High request rate abuse indicator matched: {pattern}")
+                break
+
+    # Rule 3: Brute Force / Auth Failure / Invalid Token Detection
+    auth_fail_patterns = [
+        r"(?i)\bfailed\s+password\b",
+        r"(?i)\bfailed\s+ssh\b",
+        r"(?i)\bfailed\s+login\b",
+        r"(?i)\blogin\s+failed\b",
+        r"(?i)\bauthentication\s+failure\b",
+        r"(?i)\bauth_failure\b",
+        r"(?i)\binvalid\s+(?:api\s+)?token\b",
+        r"(?i)\bunauthorized\s+token\b",
+        r"(?i)\btoken_expired\b",
+        r"(?i)\bjwt_invalid\b",
+        r"(?i)\binvalid\s+user\b"
+    ]
+    is_auth_fail = any(re.search(pat, raw_log) or re.search(pat, endpoint) for pat in auth_fail_patterns)
+
+    if status_code == 401 or "/api/v1/auth" in endpoint or is_auth_fail:
         is_anomaly = True
         if threat_type == "NORMAL":
             threat_type = "BRUTE_FORCE"
-            severity = "HIGH" if "/login" in endpoint or "/auth" in endpoint else "MEDIUM"
+            severity = "HIGH" if ("/login" in endpoint or "/auth" in endpoint or "password" in raw_log.lower() or "token" in raw_log.lower()) else "MEDIUM"
             mitre_id = "T1110"
-        rules_matched.append(f"HTTP 401 / Auth brute force response for {endpoint}")
+        rules_matched.append(f"Auth failure / Brute force / Invalid token detected for {endpoint}")
     elif "/admin" in endpoint and status_code in [403, 401, 500]:
         is_anomaly = True
         if threat_type == "NORMAL":
@@ -131,6 +191,22 @@ def analyze_log_entry(entry: LogEntry) -> dict:
             severity = "HIGH"
             mitre_id = "T1078"
         rules_matched.append(f"Suspicious access attempt to admin endpoint: {endpoint}")
+
+    # Rule 3.5: Suspicious Input Indicator
+    suspicious_input_patterns = [
+        r"(?i)\bsuspicious\s+input\b",
+        r"(?i)\bmalicious\s+payload\b",
+        r"(?i)\binput\s+validation\s+failure\b"
+    ]
+    for pattern in suspicious_input_patterns:
+        if re.search(pattern, raw_log) or re.search(pattern, endpoint):
+            is_anomaly = True
+            if threat_type == "NORMAL":
+                threat_type = "SQL_INJECTION" if ("sqli" in raw_log.lower() or "select" in raw_log.lower()) else "SECURITY_ANOMALY"
+                severity = "HIGH"
+                mitre_id = "T1190"
+            rules_matched.append(f"Suspicious input pattern matched: {pattern}")
+            break
 
     # Rule 4: High Entropy Anomaly
     if endpoint_entropy > 4.5:

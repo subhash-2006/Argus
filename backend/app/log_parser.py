@@ -101,6 +101,80 @@ def parse_csv_content(content: str) -> Tuple[List[LogEntry], int, int]:
 
     return entries, valid, invalid
 
+def _normalize_json_dict(item: dict, default_ua: str = "Uploaded JSON Log") -> LogEntry:
+    ip = (
+        item.get('ip') or
+        item.get('source_ip') or
+        item.get('src_ip') or
+        item.get('client_ip') or
+        item.get('client_host') or
+        item.get('host') or
+        item.get('remote_addr') or
+        item.get('addr') or
+        '127.0.0.1'
+    )
+
+    raw_method = item.get('method') or item.get('http_method') or item.get('action') or item.get('operation') or 'GET'
+    if isinstance(raw_method, str) and raw_method.upper() in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']:
+        method = raw_method.upper()
+    else:
+        method = 'GET'
+
+    endpoint = (
+        item.get('endpoint') or
+        item.get('url') or
+        item.get('uri') or
+        item.get('path') or
+        item.get('resource') or
+        item.get('target') or
+        (f"/{item.get('service')}" if item.get('service') else None) or
+        '/'
+    )
+
+    st_raw = item.get('status_code') or item.get('status') or item.get('code') or item.get('response_code')
+    status_code = None
+    if st_raw is not None:
+        try:
+            if str(st_raw).isdigit():
+                status_code = int(st_raw)
+        except Exception:
+            pass
+
+    level = str(item.get('level') or '').upper()
+    message = str(item.get('message') or item.get('msg') or item.get('event') or item.get('detail') or '').lower()
+
+    if status_code is None:
+        if any(term in message for term in ['privilege', 'sudo', 'escalat', 'unauthorized', 'forbidden', 'denied']):
+            status_code = 403
+        elif any(term in message for term in ['rate', 'too many', 'exceeded', 'limit']) or (isinstance(item.get('requests'), int) and item.get('requests') > 20):
+            status_code = 429
+        elif any(term in message for term in ['failed', 'invalid', 'bad', 'auth', 'password', 'token', 'unauthorized']) or (isinstance(item.get('count'), int) and item.get('count') > 1):
+            status_code = 401
+        elif level in ['ERROR', 'CRITICAL', 'FATAL']:
+            status_code = 500
+        elif level in ['WARN', 'WARNING']:
+            status_code = 401
+        else:
+            status_code = 200
+
+    user_agent = item.get('user_agent') or item.get('agent') or item.get('service') or default_ua
+
+    raw_log = item.get('raw_log')
+    if not raw_log:
+        raw_log = json.dumps(item)
+
+    timestamp = item.get('timestamp') or item.get('time') or datetime.now(timezone.utc).isoformat()
+
+    return LogEntry(
+        ip=str(ip),
+        method=str(method),
+        endpoint=redact_sensitive_data(str(endpoint)),
+        status_code=int(status_code),
+        user_agent=redact_sensitive_data(str(user_agent)),
+        raw_log=redact_sensitive_data(str(raw_log)),
+        timestamp=str(timestamp)
+    )
+
 def parse_json_content(content: str) -> Tuple[List[LogEntry], int, int]:
     entries = []
     valid = 0
@@ -120,27 +194,7 @@ def parse_json_content(content: str) -> Tuple[List[LogEntry], int, int]:
                 invalid += 1
                 continue
             
-            ip = item.get('ip') or item.get('client_ip') or item.get('host') or '127.0.0.1'
-            method = (item.get('method') or item.get('http_method') or 'GET').upper()
-            endpoint = item.get('endpoint') or item.get('url') or item.get('path') or '/'
-            st_raw = item.get('status_code') or item.get('status') or 200
-            try:
-                status_code = int(st_raw)
-            except Exception:
-                status_code = 200
-            user_agent = item.get('user_agent') or item.get('agent') or 'Mozilla/5.0 (Uploaded JSON Log)'
-            raw_log = item.get('raw_log') or json.dumps(item)
-            timestamp = item.get('timestamp') or item.get('time') or datetime.now(timezone.utc).isoformat()
-
-            entries.append(LogEntry(
-                ip=ip,
-                method=method,
-                endpoint=redact_sensitive_data(endpoint),
-                status_code=status_code,
-                user_agent=redact_sensitive_data(user_agent),
-                raw_log=redact_sensitive_data(raw_log),
-                timestamp=timestamp
-            ))
+            entries.append(_normalize_json_dict(item, "Uploaded JSON Log"))
             valid += 1
     except Exception:
         invalid += 1
@@ -163,27 +217,7 @@ def parse_jsonl_content(content: str) -> Tuple[List[LogEntry], int, int]:
                 invalid += 1
                 continue
             
-            ip = item.get('ip') or item.get('client_ip') or item.get('host') or '127.0.0.1'
-            method = (item.get('method') or item.get('http_method') or 'GET').upper()
-            endpoint = item.get('endpoint') or item.get('url') or item.get('path') or '/'
-            st_raw = item.get('status_code') or item.get('status') or 200
-            try:
-                status_code = int(st_raw)
-            except Exception:
-                status_code = 200
-            user_agent = item.get('user_agent') or item.get('agent') or 'Mozilla/5.0 (Uploaded JSONL Log)'
-            raw_log = item.get('raw_log') or line_str
-            timestamp = item.get('timestamp') or item.get('time') or datetime.now(timezone.utc).isoformat()
-
-            entries.append(LogEntry(
-                ip=ip,
-                method=method,
-                endpoint=redact_sensitive_data(endpoint),
-                status_code=status_code,
-                user_agent=redact_sensitive_data(user_agent),
-                raw_log=redact_sensitive_data(raw_log),
-                timestamp=timestamp
-            ))
+            entries.append(_normalize_json_dict(item, "Uploaded JSONL Log"))
             valid += 1
         except Exception:
             invalid += 1

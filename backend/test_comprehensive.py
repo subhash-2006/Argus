@@ -317,6 +317,43 @@ class TestLogSentinelComprehensive(unittest.TestCase):
         self.assertLess(duration, 1.5, f"Bulk upload took {duration:.2f}s, expected < 1.5s")
         print(f"[OK] 50-anomaly bulk file upload completed in {duration:.3f}s (< 1.5s limit)")
 
+    def test_09_structured_jsonl_log_sentinel_test(self):
+        """Verify 8 structured JSONL security events are correctly parsed and flagged as anomalies"""
+        print("\n--- 9. Testing Structured JSONL Log Sentinel File ---")
+        jsonl_lines = [
+            '{"timestamp": "2026-10-09T20:00:01Z", "source_ip": "192.0.2.80", "service": "sshd", "level": "WARN", "message": "Failed password for root from 192.0.2.80 port 49152 ssh2", "count": 1}',
+            '{"timestamp": "2026-10-09T20:00:02Z", "source_ip": "192.0.2.80", "service": "sshd", "level": "WARN", "message": "Failed password for admin from 192.0.2.80 port 49153 ssh2", "count": 2}',
+            '{"timestamp": "2026-10-09T20:00:03Z", "source_ip": "192.0.2.80", "service": "sshd", "level": "WARN", "message": "Failed password for user1 from 192.0.2.80 port 49154 ssh2", "count": 3}',
+            '{"timestamp": "2026-10-09T20:00:04Z", "source_ip": "192.0.2.80", "service": "sshd", "level": "WARN", "message": "Failed password for root from 192.0.2.80 port 49155 ssh2", "count": 4}',
+            '{"timestamp": "2026-10-09T20:01:00Z", "source_ip": "198.51.100.22", "service": "web", "endpoint": "/products?id=1%20UNION%20SELECT%20CHAR(39),password%20FROM%20users--", "message": "Suspicious input detected in request parameter", "status_code": 500}',
+            '{"timestamp": "2026-10-09T20:02:00Z", "source_ip": "203.0.113.10", "service": "gateway", "endpoint": "/api/v1/resource", "message": "Unusually high request rates from client IP", "requests": 350, "status_code": 429}',
+            '{"timestamp": "2026-10-09T20:03:00Z", "source_ip": "198.51.100.99", "service": "auth-service", "endpoint": "/api/v1/auth", "message": "Repeated invalid API tokens received", "status_code": 401}',
+            '{"timestamp": "2026-10-09T20:04:00Z", "source_ip": "192.0.2.80", "service": "systemd-exec", "endpoint": "/admin/sudo", "message": "Privilege-escalation attempt detected: unauthorized sudo command execution", "status_code": 403}'
+        ]
+        jsonl_content = "\n".join(jsonl_lines).encode("utf-8")
+
+        response = self.client.post(
+            "/api/analyze-file",
+            files={"file": ("log_sentinel_test.jsonl", jsonl_content, "application/json")}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["total_parsed"], 8)
+        self.assertEqual(data["anomalies_count"], 8)
+        
+        # Verify source_ip mapping for 192.0.2.80
+        ssh_anomalies = [a for a in data["anomalies"] if a["ip"] == "192.0.2.80"]
+        self.assertGreaterEqual(len(ssh_anomalies), 5)
+        
+        # Verify threat categories detected
+        threats = set(data["threat_categories"])
+        self.assertIn("BRUTE_FORCE", threats)
+        self.assertIn("SQL_INJECTION", threats)
+        self.assertIn("RATE_LIMIT_ABUSE", threats)
+        self.assertIn("PRIVILEGE_ESCALATION", threats)
+        print("[OK] Structured JSONL file (log_sentinel_test.jsonl) 8/8 events correctly parsed and flagged as anomalies")
+
 
 if __name__ == "__main__":
     unittest.main()

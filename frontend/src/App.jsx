@@ -223,12 +223,29 @@ const getRecommendedActions = (threatType) => {
 
 // Helper to analyze single log entry locally for 100% demo reliability
 const analyzeSingleLogClientSide = (entry) => {
-  const ip = entry.ip || "127.0.0.1";
-  const method = (entry.method || "GET").toUpperCase();
-  const endpoint = entry.endpoint || "/";
-  const status_code = parseInt(entry.status_code || 200, 10);
-  const user_agent = entry.user_agent || "Manual Ingest";
-  const raw_log = entry.raw_log || `${ip} - - ${method} ${endpoint} ${status_code}`;
+  const ip = entry.ip || entry.source_ip || entry.src_ip || entry.client_ip || entry.client_host || entry.host || "127.0.0.1";
+  const rawMethod = entry.method || entry.http_method || entry.action || "GET";
+  const method = typeof rawMethod === 'string' ? rawMethod.toUpperCase() : "GET";
+  const endpoint = entry.endpoint || entry.url || entry.uri || entry.path || entry.resource || (entry.service ? "/" + entry.service : "/");
+  const user_agent = entry.user_agent || entry.agent || entry.service || "Manual Ingest";
+  const raw_log = entry.raw_log || JSON.stringify(entry);
+
+  let status_code = null;
+  const st_raw = entry.status_code !== undefined ? entry.status_code : entry.status;
+  if (st_raw !== undefined && st_raw !== null) {
+    const parsedSt = parseInt(st_raw, 10);
+    if (!isNaN(parsedSt)) status_code = parsedSt;
+  }
+
+  const lowerEp = endpoint.toLowerCase();
+  const lowerRaw = raw_log.toLowerCase();
+
+  if (status_code === null) {
+    if (/(privilege|sudo|escalat|unauthorized|forbidden|denied)/i.test(lowerRaw)) status_code = 403;
+    else if (/(rate|too many|exceeded|limit)/i.test(lowerRaw) || (entry.requests && entry.requests > 20)) status_code = 429;
+    else if (/(failed|invalid|bad|auth|password|token)/i.test(lowerRaw) || (entry.count && entry.count > 1)) status_code = 401;
+    else status_code = 200;
+  }
 
   let is_anomaly = false;
   let threat_type = "NORMAL";
@@ -236,16 +253,25 @@ const analyzeSingleLogClientSide = (entry) => {
   let mitre_id = "N/A";
   let rule_matched = [];
 
-  const lowerEp = endpoint.toLowerCase();
-  const lowerRaw = raw_log.toLowerCase();
-
-  if (lowerEp.includes(".env") || lowerEp.includes("admin.bak") || lowerEp.includes("secret")) {
+  if (lowerEp.includes(".env") || lowerEp.includes("admin.bak") || lowerEp.includes("secret") || lowerEp.includes("wp-config")) {
     is_anomaly = true;
     threat_type = "HONEYTOKEN_ACCESS";
     severity = "CRITICAL";
     mitre_id = "T1595";
     rule_matched.push(`Honeytoken trap file accessed: ${endpoint}`);
-  } else if (/(union|select|concat|char|information_schema|drop|table|mysql\.user|--)/i.test(lowerEp) || /(union|select|concat|char|information_schema|drop|table|mysql\.user|--)/i.test(lowerRaw)) {
+  } else if (/(privilege[-_ ]escalation|unauthorized\s+sudo|sudoers|polkit|setuid|role[-_ ]escalation|su\s+root)/i.test(lowerRaw) || /(privilege[-_ ]escalation|sudo)/i.test(lowerEp)) {
+    is_anomaly = true;
+    threat_type = "PRIVILEGE_ESCALATION";
+    severity = "CRITICAL";
+    mitre_id = "T1548";
+    rule_matched.push("Privilege escalation indicator matched");
+  } else if (status_code === 429 || /(high\s+request\s+rate|rate\s+limit|too\s+many\s+requests|request\s+rate\s+exceeded)/i.test(lowerRaw)) {
+    is_anomaly = true;
+    threat_type = "RATE_LIMIT_ABUSE";
+    severity = "HIGH";
+    mitre_id = "T1499";
+    rule_matched.push("High request rate / rate limit abuse detected");
+  } else if (/(union|select|concat|char|information_schema|drop|table|mysql\.user|--|suspicious\s+input)/i.test(lowerEp) || /(union|select|concat|char|information_schema|drop|table|mysql\.user|--|suspicious\s+input)/i.test(lowerRaw)) {
     is_anomaly = true;
     threat_type = "SQL_INJECTION";
     severity = "CRITICAL";
@@ -257,19 +283,25 @@ const analyzeSingleLogClientSide = (entry) => {
     severity = "HIGH";
     mitre_id = "T1059.007";
     rule_matched.push("Cross-site scripting (XSS) payload matched");
-  } else if ((lowerEp.includes("auth") || lowerEp.includes("login")) && (status_code === 401 || status_code === 403)) {
+  } else if (status_code === 401 || (lowerEp.includes("auth") || lowerEp.includes("login")) || /(failed\s+password|failed\s+ssh|failed\s+login|login\s+failed|authentication\s+failure|invalid\s+(?:api\s+)?token|unauthorized\s+token|token_expired|jwt_invalid)/i.test(lowerRaw)) {
     is_anomaly = true;
     threat_type = "BRUTE_FORCE";
     severity = "HIGH";
     mitre_id = "T1110";
-    rule_matched.push("Failed authentication attempt on login endpoint");
+    rule_matched.push("Auth failure / Brute force / Invalid token detected");
+  } else if (lowerEp.includes("admin") && (status_code === 403 || status_code === 401 || status_code === 500)) {
+    is_anomaly = true;
+    threat_type = "UNAUTHORIZED_ADMIN_ACCESS";
+    severity = "HIGH";
+    mitre_id = "T1078";
+    rule_matched.push("Suspicious access attempt to admin endpoint");
   }
 
   const inc_id = `INC-C${Math.floor(100000 + Math.random() * 900000)}`;
 
   return {
     incident_id: inc_id,
-    timestamp: new Date().toISOString(),
+    timestamp: entry.timestamp || new Date().toISOString(),
     ip,
     method,
     endpoint,
@@ -278,9 +310,9 @@ const analyzeSingleLogClientSide = (entry) => {
     raw_log,
     is_anomaly,
     threat_type,
-    severity,
+    severity: is_anomaly ? severity : "INFO",
     mitre_id,
-    rule_matched,
+    rule_matched: rule_matched.length > 0 ? rule_matched : ["None"],
     shannon_entropy: 3.8,
     ml_anomaly_prob: is_anomaly ? 0.96 : 0.04,
     gemini_triage: is_anomaly ? {
@@ -354,29 +386,47 @@ const parseAndAnalyzeLogClientSide = (filename, fileText) => {
   const threatCategories = new Set();
 
   lines.forEach((line) => {
-    let ip = "127.0.0.1";
-    let method = "GET";
-    let endpoint = "/";
-    let status_code = 200;
+    const trimmed = line.trim();
+    let parsedObj = null;
 
-    const clfMatch = line.match(/^(\S+)\s+\S+\s+\S+\s+\[[^\]]+\]\s+"([A-Z]+)\s+(\S+)\s+HTTP\/[^"]+"\s+(\d{3})/);
-    if (clfMatch) {
-      ip = clfMatch[1];
-      method = clfMatch[2];
-      endpoint = clfMatch[3];
-      status_code = parseInt(clfMatch[4], 10);
-    } else {
-      const ipMatch = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
-      if (ipMatch) ip = ipMatch[0];
-      const mMatch = line.match(/\b(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\b/);
-      if (mMatch) method = mMatch[0];
-      const epMatch = line.match(/(\/[a-zA-Z0-9_\-\.\?%&=/]*)/);
-      if (epMatch) endpoint = epMatch[1];
-      const stMatch = line.match(/\b([1-5]\d{2})\b/);
-      if (stMatch) status_code = parseInt(stMatch[0], 10);
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        parsedObj = JSON.parse(trimmed);
+      } catch (e) {}
     }
 
-    const item = analyzeSingleLogClientSide({ ip, method, endpoint, status_code, user_agent: "Uploaded Log File", raw_log: line });
+    let item;
+    if (parsedObj && typeof parsedObj === 'object') {
+      item = analyzeSingleLogClientSide({
+        ...parsedObj,
+        raw_log: parsedObj.raw_log || trimmed
+      });
+    } else {
+      let ip = "127.0.0.1";
+      let method = "GET";
+      let endpoint = "/";
+      let status_code = 200;
+
+      const clfMatch = line.match(/^(\S+)\s+\S+\s+\S+\s+\[[^\]]+\]\s+"([A-Z]+)\s+(\S+)\s+HTTP\/[^"]+"\s+(\d{3})/);
+      if (clfMatch) {
+        ip = clfMatch[1];
+        method = clfMatch[2];
+        endpoint = clfMatch[3];
+        status_code = parseInt(clfMatch[4], 10);
+      } else {
+        const ipMatch = line.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+        if (ipMatch) ip = ipMatch[0];
+        const mMatch = line.match(/\b(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\b/);
+        if (mMatch) method = mMatch[0];
+        const epMatch = line.match(/(\/[a-zA-Z0-9_\-\.\?%&=/]*)/);
+        if (epMatch) endpoint = epMatch[1];
+        const stMatch = line.match(/\b([1-5]\d{2})\b/);
+        if (stMatch) status_code = parseInt(stMatch[0], 10);
+      }
+
+      item = analyzeSingleLogClientSide({ ip, method, endpoint, status_code, user_agent: "Uploaded Log File", raw_log: line });
+    }
+
     entries.push(item);
     if (item.is_anomaly) {
       anomalies.push(item);

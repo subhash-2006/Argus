@@ -46,6 +46,8 @@ FIXED_MITRE_MAP = {
     "SQL_INJECTION": {"id": "T1190", "name": "Exploit Public-Facing Application"},
     "BRUTE_FORCE": {"id": "T1110", "name": "Brute Force"},
     "UNAUTHORIZED_ADMIN_ACCESS": {"id": "T1078", "name": "Valid Accounts"},
+    "PRIVILEGE_ESCALATION": {"id": "T1548", "name": "Abuse Elevation Control Mechanism"},
+    "RATE_LIMIT_ABUSE": {"id": "T1499", "name": "Endpoint Denial of Service"},
     "ANOMALOUS_ENTROPY": {"id": "T1027", "name": "Obfuscated Files or Information"},
     "XSS_ATTACK": {"id": "T1059.007", "name": "Command and Scripting Interpreter: JavaScript"},
     "ML_CLASSIFIED_ANOMALY": {"id": "T1083", "name": "File and Directory Discovery"},
@@ -150,6 +152,12 @@ def triage_incident_with_gemini(incident_data: dict, force_fallback: bool = Fals
     elif threat_type == "XSS_ATTACK":
         fallback_summary = f"A Cross-Site Scripting (XSS) payload was detected targeting '{endpoint}'. The attacker attempted to inject malicious script tags."
         fallback_technical = f"HTML/JS script injection vector matched in request parameters from IP {ip} targeting '{endpoint}'."
+    elif threat_type == "PRIVILEGE_ESCALATION":
+        fallback_summary = f"An unauthorized privilege escalation attempt was detected originating from IP {ip} targeting '{endpoint}'."
+        fallback_technical = f"Log pattern matching unauthorized root/sudo privilege escalation attempt received from IP {ip}."
+    elif threat_type == "RATE_LIMIT_ABUSE":
+        fallback_summary = f"Unusually high request rate / denial-of-service indicator detected from IP {ip} targeting '{endpoint}'."
+        fallback_technical = f"Request volume / HTTP 429 threshold exceeded from IP {ip} targeting endpoint '{endpoint}'."
     else:
         fallback_summary = f"High-risk anomalous traffic detected by CSIC 2010 ML Classifier & Shannon Entropy analysis on endpoint '{endpoint}'."
         fallback_technical = f"Request payload from IP {ip} on endpoint '{endpoint}' exceeded baseline anomaly threshold."
