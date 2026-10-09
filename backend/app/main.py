@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 import os
 from contextlib import asynccontextmanager
@@ -256,82 +257,110 @@ async def export_incident_pdf_post(incident_data: dict):
 
 @app.post("/api/analyze-file")
 async def analyze_log_file(file: UploadFile = File(...)):
+    start_ts = time.time()
+    iso_start = datetime.now(timezone.utc).isoformat()
+    filename = file.filename if file else "unknown"
+    print(f"[{iso_start}] [ANALYZE-FILE] Request started for filename='{filename}'")
+
     if not file or not file.filename:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Error: No file provided")
         raise HTTPException(status_code=400, detail="No file provided")
 
-    contents = await file.read()
-    if len(contents) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File size exceeds maximum limit of 10MB")
+    try:
+        contents = await file.read()
+        file_size_bytes = len(contents)
 
-    if len(contents) == 0:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        if file_size_bytes > 10 * 1024 * 1024:
+            print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Error: File size {file_size_bytes} bytes exceeds 10MB limit")
+            raise HTTPException(status_code=400, detail="File size exceeds maximum limit of 10MB")
 
-    entries, valid_count, invalid_count = parse_uploaded_file(file.filename, contents, max_entries=2000)
+        if file_size_bytes == 0:
+            print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Error: Uploaded file is empty")
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    if not entries:
+        entries, valid_count, invalid_count = parse_uploaded_file(file.filename, contents, max_entries=2000)
+        duration_parse = round(time.time() - start_ts, 3)
+        print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Parsing finished in {duration_parse}s. Total entries={len(entries)}, valid={valid_count}, invalid={invalid_count}")
+
+        if not entries:
+            duration_total = round(time.time() - start_ts, 3)
+            print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Completed in {duration_total}s with 0 valid entries")
+            return {
+                "success": False,
+                "filename": file.filename,
+                "message": "No valid log entries could be parsed from the uploaded file",
+                "total_parsed": 0,
+                "valid_entries": 0,
+                "invalid_entries": invalid_count,
+                "anomalies_count": 0,
+                "anomalies": []
+            }
+
+        analyses = []
+        anomalies = []
+
+        for entry in entries:
+            analysis = analyze_log_entry(entry)
+            if analysis.get("is_anomaly"):
+                ai_triage = triage_incident_with_gemini(analysis)
+                if ai_triage:
+                    gemini_data = ai_triage.model_dump()
+                    analysis["gemini_triage"] = gemini_data
+                    analysis["mitre_id"] = gemini_data.get("mitre_technique_id", analysis.get("mitre_id"))
+
+                if db is not None:
+                    try:
+                        await db.incidents.insert_one(analysis.copy())
+                    except Exception as err:
+                        print(f"Mongo incident insert error: {err}")
+
+                anomalies.append(analysis)
+                try:
+                    await manager.broadcast(analysis)
+                except Exception as b_err:
+                    print(f"WebSocket broadcast error during file analysis: {b_err}")
+            else:
+                if db is not None:
+                    try:
+                        await db.raw_logs.insert_one(analysis.copy())
+                    except Exception as err:
+                        pass
+
+            analyses.append(analysis)
+
+        severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        threat_categories = set()
+        for a in anomalies:
+            sev = (a.get("severity") or "MEDIUM").upper()
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
+            if a.get("threat_type"):
+                threat_categories.add(a.get("threat_type"))
+
+        duration_total = round(time.time() - start_ts, 3)
+        print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Analysis successfully completed in {duration_total}s for '{file.filename}'. Entries parsed: {len(entries)}, Anomalies found: {len(anomalies)}")
+
         return {
-            "success": False,
+            "success": True,
             "filename": file.filename,
-            "message": "No valid log entries could be parsed from the uploaded file",
-            "total_parsed": 0,
-            "valid_entries": 0,
+            "total_parsed": len(entries),
+            "valid_entries": valid_count,
             "invalid_entries": invalid_count,
-            "anomalies_count": 0,
-            "anomalies": []
+            "anomalies_count": len(anomalies),
+            "anomalies": anomalies,
+            "severity_summary": severity_counts,
+            "threat_categories": list(threat_categories),
+            "message": f"Successfully parsed {len(entries)} log entries. Detected {len(anomalies)} security anomalies."
         }
-
-    analyses = []
-    anomalies = []
-
-    for entry in entries:
-        analysis = analyze_log_entry(entry)
-        if analysis.get("is_anomaly"):
-            ai_triage = triage_incident_with_gemini(analysis)
-            if ai_triage:
-                gemini_data = ai_triage.model_dump()
-                analysis["gemini_triage"] = gemini_data
-                analysis["mitre_id"] = gemini_data.get("mitre_technique_id", analysis.get("mitre_id"))
-
-            if db is not None:
-                try:
-                    await db.incidents.insert_one(analysis.copy())
-                except Exception as err:
-                    print(f"Mongo incident insert error: {err}")
-
-            anomalies.append(analysis)
-            try:
-                await manager.broadcast(analysis)
-            except Exception as b_err:
-                print(f"WebSocket broadcast error during file analysis: {b_err}")
-        else:
-            if db is not None:
-                try:
-                    await db.raw_logs.insert_one(analysis.copy())
-                except Exception as err:
-                    pass
-
-        analyses.append(analysis)
-
-    severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
-    threat_categories = set()
-    for a in anomalies:
-        sev = (a.get("severity") or "MEDIUM").upper()
-        severity_counts[sev] = severity_counts.get(sev, 0) + 1
-        if a.get("threat_type"):
-            threat_categories.add(a.get("threat_type"))
-
-    return {
-        "success": True,
-        "filename": file.filename,
-        "total_parsed": len(entries),
-        "valid_entries": valid_count,
-        "invalid_entries": invalid_count,
-        "anomalies_count": len(anomalies),
-        "anomalies": anomalies,
-        "severity_summary": severity_counts,
-        "threat_categories": list(threat_categories),
-        "message": f"Successfully parsed {len(entries)} log entries. Detected {len(anomalies)} security anomalies."
-    }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        duration_err = round(time.time() - start_ts, 3)
+        err_type = exc.__class__.__name__
+        err_msg = str(exc)
+        sanitized_msg = err_msg.replace(MONGODB_URI, "[REDACTED_URI]") if MONGODB_URI else err_msg
+        sanitized_msg = sanitized_msg.replace(GEMINI_API_KEY, "[REDACTED_KEY]") if GEMINI_API_KEY else sanitized_msg
+        print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Failed after {duration_err}s with {err_type}: {sanitized_msg}")
+        raise HTTPException(status_code=500, detail=f"File analysis failed due to internal server error ({err_type})")
 
 
 

@@ -226,6 +226,58 @@ class TestLogSentinelComprehensive(unittest.TestCase):
             )
             print(f"[OK] Preflight OPTIONS passed for {ep}")
 
+    def test_07_gemini_429_quota_and_404_fallback(self):
+        """Verify Gemini 429 quota and 404 unavailable model errors trigger immediate deterministic fallback"""
+        print("\n--- 7. Testing Gemini 429 Quota & 404 Unavailable Model Fallback ---")
+        from unittest.mock import patch
+
+        incident = {
+            "ip": "198.51.100.99",
+            "endpoint": "/api/v1/auth",
+            "threat_type": "BRUTE_FORCE",
+            "severity": "HIGH",
+            "status_code": 401
+        }
+
+        # 1. Test 429 RESOURCE_EXHAUSTED
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.models.generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED: quota exceeded")
+            
+            res = triage_incident_with_gemini(incident)
+            self.assertIsNotNone(res)
+            self.assertEqual(res.mitre_technique_id, "T1110")
+            self.assertIn("surge of unauthorized", res.plain_summary.lower())
+            print("[OK] 429 Quota Error immediately handled with deterministic fallback")
+
+        # 2. Test 404 NOT_FOUND model unavailable
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.models.generate_content.side_effect = Exception("404 NOT_FOUND: model unavailable")
+            
+            res = triage_incident_with_gemini(incident)
+            self.assertIsNotNone(res)
+            self.assertEqual(res.mitre_technique_id, "T1110")
+            print("[OK] 404 Unavailable Model immediately handled with deterministic fallback")
+
+        # 3. Test File Upload POST /api/analyze-file with Gemini throwing 429
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.models.generate_content.side_effect = Exception("429 Quota Exceeded")
+
+            brute_force_log = '198.51.100.99 - - [09/Oct/2026:07:15:00] "POST /api/v1/auth HTTP/1.1" 401 128'
+            response = self.client.post(
+                "/api/analyze-file",
+                files={"file": ("brute.log", brute_force_log.encode('utf-8'), "text/plain")}
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertTrue(data["success"])
+            self.assertEqual(data["anomalies_count"], 1)
+            self.assertIn("gemini_triage", data["anomalies"][0])
+            print("[OK] File upload succeeds with 200 OK and AI fallback when Gemini returns 429")
+
 
 if __name__ == "__main__":
     unittest.main()
+
