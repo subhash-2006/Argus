@@ -16,6 +16,28 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+try:
+    from app.attack_definitions import get_attack_definition
+except ImportError:
+    try:
+        from .attack_definitions import get_attack_definition
+    except ImportError:
+        def get_attack_definition(threat_type, rules=None):
+            return {
+                "display_name": threat_type or "Suspicious Activity",
+                "short_definition": "Unusual activity was flagged by the detection rules that differs from expected system behavior and requires further investigation.",
+                "severity": "MEDIUM"
+            }
+
+
+def sanitize_pdf_text(text: Any) -> str:
+    """Escapes XML entities in strings before passing them to ReportLab Paragraphs."""
+    if text is None:
+        return ""
+    s = str(text)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 
 class NumberedCanvas(canvas.Canvas):
     """
@@ -45,7 +67,7 @@ class NumberedCanvas(canvas.Canvas):
 
         # Running Header (pages > 1)
         if self._pageNumber > 1:
-            self.drawString(36, 11 * 72 - 28, "Log Sentinel | AI Security Operations Center — Incident Report")
+            self.drawString(36, 11 * 72 - 28, "Log Sentinel | AI Security Operations Center â€” Incident Report")
             self.setStrokeColor(colors.HexColor("#E2E8F0"))
             self.setLineWidth(0.5)
             self.line(36, 11 * 72 - 32, 8.5 * 72 - 36, 11 * 72 - 32)
@@ -53,7 +75,7 @@ class NumberedCanvas(canvas.Canvas):
         # Running Footer
         page_text = f"Page {self._pageNumber} of {page_count}"
         self.drawRightString(8.5 * 72 - 36, 25, page_text)
-        self.drawString(36, 25, "CONFIDENTIAL & PROPRIETARY — FOR AUTHORIZED DEVELOPER / SOC USE ONLY")
+        self.drawString(36, 25, "CONFIDENTIAL & PROPRIETARY â€” FOR AUTHORIZED DEVELOPER / SOC USE ONLY")
         self.setStrokeColor(colors.HexColor("#E2E8F0"))
         self.setLineWidth(0.5)
         self.line(36, 35, 8.5 * 72 - 36, 35)
@@ -245,7 +267,7 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
         ],
         [
             Paragraph("<b>MITRE ATT&CK:</b>", table_cell_style),
-            Paragraph(f"<b>{mitre_id}</b> — {mitre_name}", table_cell_style),
+            Paragraph(f"<b>{mitre_id}</b> â€” {mitre_name}", table_cell_style),
             Paragraph("<b>Total Related Events:</b>", table_cell_style),
             Paragraph(str(total_events), table_cell_style),
         ],
@@ -263,12 +285,14 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
 
     # SECTION 2: EXECUTIVE SUMMARY
     story.append(Paragraph("2. Executive Summary (Developer & Management Brief)", section_heading))
+    attack_info = get_attack_definition(threat_type, rules_matched if isinstance(rules_matched, list) else None)
     exec_summary_text = (
-        f"<b>What Happened:</b> {plain_summary}<br/><br/>"
-        f"<b>Suspected Attack Vector:</b> The automated detection engine flagged traffic matching <b>{threat_type}</b> "
-        f"patterns originating from IP <code>{ip}</code> targeting <code>{endpoint}</code>.<br/><br/>"
+        f"<b>What Happened:</b> {sanitize_pdf_text(plain_summary)}<br/><br/>"
+        f"<b>Attack Definition:</b> {sanitize_pdf_text(attack_info.get('short_definition', ''))}<br/><br/>"
+        f"<b>Suspected Attack Vector:</b> The automated detection engine flagged traffic matching <b>{sanitize_pdf_text(attack_info.get('display_name', threat_type))}</b> "
+        f"patterns originating from IP <code>{sanitize_pdf_text(ip)}</code> targeting <code>{sanitize_pdf_text(endpoint)}</code>.<br/><br/>"
         f"<b>Why it is Suspicious:</b> The incoming request exhibited high-risk characteristics, including "
-        f"matched security signatures ({rules_matched_str}) and abnormal request structure.<br/><br/>"
+        f"matched security signatures ({sanitize_pdf_text(rules_matched_str)}) and abnormal request structure.<br/><br/>"
         f"<b>Potential Business & Technical Impact:</b> If left unmitigated, this vector could allow unauthorized "
         f"data access, system compromise, authentication bypass, or denial of service on application services.<br/><br/>"
         f"<b>Current Evidence Status:</b> Observed request telemetry has been verified against rule engines, Shannon entropy analysis, "
@@ -329,8 +353,8 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
     tech_text = (
         f"<b>Attack Mechanism:</b> {technical_details}<br/><br/>"
         f"<b>Observed vs. Inferred Data:</b><br/>"
-        f"• <i>Observed:</i> HTTP {method} request from IP <code>{ip}</code> to <code>{endpoint}</code> returning HTTP {status_code}. User Agent: <code>{user_agent}</code>.<br/>"
-        f"• <i>Inferred:</i> Automated scan/exploit attempt matching MITRE ATT&CK <b>{mitre_id} ({mitre_name})</b>.<br/><br/>"
+        f"â€¢ <i>Observed:</i> HTTP {method} request from IP <code>{ip}</code> to <code>{endpoint}</code> returning HTTP {status_code}. User Agent: <code>{user_agent}</code>.<br/>"
+        f"â€¢ <i>Inferred:</i> Automated scan/exploit attempt matching MITRE ATT&CK <b>{mitre_id} ({mitre_name})</b>.<br/><br/>"
         f"<b>Detection Pipeline Engines Fired:</b><br/>"
         f"1. <b>Rule Matching:</b> {rules_matched_str}<br/>"
         f"2. <b>CSIC 2010 Isolation Forest ML Model:</b> Anomaly confidence {confidence_str}.<br/>"
@@ -346,7 +370,7 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
     story.append(Paragraph("5. Prioritized Remediation Plan", section_heading))
     
     remed_text = (
-        "<b>Priority 1 — Immediate Containment:</b><br/>"
+        "<b>Priority 1 â€” Immediate Containment:</b><br/>"
         f"Block offending IP address at the firewall or reverse proxy immediately.<br/>"
         f"<b>Nginx Rule:</b><br/>"
     )
@@ -357,13 +381,13 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
     story.append(Paragraph(firewall_rule, code_style))
 
     app_fixes_text = (
-        "<b>Priority 2 — Application Code Fixes:</b><br/>"
-        "• Validate and sanitize all incoming input parameters on server-side.<br/>"
-        "• Use parameterized queries (ORM / Prepared Statements) to prevent SQL Injection.<br/>"
-        "• Implement rate limiting middleware (e.g. max 10 requests/minute per IP on sensitive routes).<br/><br/>"
-        "<b>Priority 3 — Infrastructure & Authentication Enhancements:</b><br/>"
-        "• Enable WAF (Web Application Firewall) rules on Cloudflare or Render.<br/>"
-        "• Require Multi-Factor Authentication (MFA) and account lockouts after consecutive failed attempts."
+        "<b>Priority 2 â€” Application Code Fixes:</b><br/>"
+        "â€¢ Validate and sanitize all incoming input parameters on server-side.<br/>"
+        "â€¢ Use parameterized queries (ORM / Prepared Statements) to prevent SQL Injection.<br/>"
+        "â€¢ Implement rate limiting middleware (e.g. max 10 requests/minute per IP on sensitive routes).<br/><br/>"
+        "<b>Priority 3 â€” Infrastructure & Authentication Enhancements:</b><br/>"
+        "â€¢ Enable WAF (Web Application Firewall) rules on Cloudflare or Render.<br/>"
+        "â€¢ Require Multi-Factor Authentication (MFA) and account lockouts after consecutive failed attempts."
     )
     story.append(Paragraph(app_fixes_text, body_style))
     story.append(Spacer(1, 10))
@@ -371,11 +395,11 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
     # SECTION 6: DEVELOPER ACTION CHECKLIST
     story.append(Paragraph("6. Developer Action Checklist", section_heading))
     checklist_items = [
-        "<b>[ ] Step 1: Verification</b> — Inspect server access logs to confirm if IP <code>" + ip + "</code> reached internal resources.",
-        "<b>[ ] Step 2: Containment</b> — Execute Nginx or iptables block rule to drop malicious traffic.",
-        "<b>[ ] Step 3: Patch Codebase</b> — Review <code>" + endpoint + "</code> controller logic for input validation vulnerabilities.",
-        "<b>[ ] Step 4: Test Fixes</b> — Perform unit and regression tests with security payloads (e.g., SQLi/XSS test suites).",
-        "<b>[ ] Step 5: Post-Incident Review</b> — Verify log alerts in Log Sentinel dashboard and confirm zero recurring anomalies."
+        "<b>[ ] Step 1: Verification</b> â€” Inspect server access logs to confirm if IP <code>" + ip + "</code> reached internal resources.",
+        "<b>[ ] Step 2: Containment</b> â€” Execute Nginx or iptables block rule to drop malicious traffic.",
+        "<b>[ ] Step 3: Patch Codebase</b> â€” Review <code>" + endpoint + "</code> controller logic for input validation vulnerabilities.",
+        "<b>[ ] Step 4: Test Fixes</b> â€” Perform unit and regression tests with security payloads (e.g., SQLi/XSS test suites).",
+        "<b>[ ] Step 5: Post-Incident Review</b> â€” Verify log alerts in Log Sentinel dashboard and confirm zero recurring anomalies."
     ]
     for chk in checklist_items:
         story.append(Paragraph(chk, body_style))
@@ -385,9 +409,9 @@ def generate_incident_pdf(incident_data: Dict[str, Any]) -> bytes:
     # SECTION 7: VALIDATION AND REFERENCES
     story.append(Paragraph("7. Validation & References", section_heading))
     refs_text = (
-        f"• <b>MITRE ATT&CK Framework:</b> <font color='#2563EB'><u>https://attack.mitre.org/techniques/{mitre_id.replace('.', '/')}</u></font><br/>"
-        f"• <b>OWASP Top 10 Web Application Security Risks</b> (A03:2021-Injection, A01:2021-Broken Access Control)<br/>"
-        f"• <b>Log Sentinel Telemetry System:</b> Verified via Rules Engine, CSIC 2010 ML Model, and Gemini 2.5/3.5 Flash AI."
+        f"â€¢ <b>MITRE ATT&CK Framework:</b> <font color='#2563EB'><u>https://attack.mitre.org/techniques/{mitre_id.replace('.', '/')}</u></font><br/>"
+        f"â€¢ <b>OWASP Top 10 Web Application Security Risks</b> (A03:2021-Injection, A01:2021-Broken Access Control)<br/>"
+        f"â€¢ <b>Log Sentinel Telemetry System:</b> Verified via Rules Engine, CSIC 2010 ML Model, and Gemini 2.5/3.5 Flash AI."
     )
     story.append(Paragraph(refs_text, body_style))
 
@@ -577,3 +601,297 @@ def generate_summary_pdf(incidents: List[Dict[str, Any]]) -> bytes:
     buffer.seek(0)
     return buffer.getvalue()
 
+
+def generate_analysis_report_pdf(analysis_data: Dict[str, Any]) -> bytes:
+    """
+    Generates a professional multi-page Threat Analysis PDF Report for the given analysis run
+    (from bulk file uploads, simulations, or consolidated incident datasets).
+    Strictly includes all mandatory Log Sentinel requirements:
+      - Log Sentinel report title
+      - Analysis date and time
+      - Uploaded filename
+      - Number of records analysed
+      - Number of suspicious findings
+      - Overall severity
+      - Detected attack names
+      - A short definition of each detected attack
+      - Detection reasons and relevant supporting evidence
+      - Important findings and timestamps
+      - Recommended investigation or remediation steps
+      - Whether AI-assisted triage was used
+      - Whether local fallback processing was used
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=40,
+        bottomMargin=45
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'AnalysisDocTitle',
+        parent=styles['Heading1'],
+        fontName='Helvetica-Bold',
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#0F172A")
+    )
+    subtitle_style = ParagraphStyle(
+        'AnalysisDocSubtitle',
+        parent=styles['Normal'],
+        fontName='Helvetica-Bold',
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#3B82F6")
+    )
+    section_heading = ParagraphStyle(
+        'AnalysisSectionHeading',
+        parent=styles['Heading2'],
+        fontName='Helvetica-Bold',
+        fontSize=12,
+        leading=16,
+        textColor=colors.HexColor("#1E293B"),
+        spaceBefore=14,
+        spaceAfter=6,
+        keepWithNext=True
+    )
+    body_style = ParagraphStyle(
+        'AnalysisBodyDark',
+        parent=styles['BodyText'],
+        fontName='Helvetica',
+        fontSize=9,
+        leading=13,
+        textColor=colors.HexColor("#334155")
+    )
+    table_cell_style = ParagraphStyle(
+        'AnalysisTableCell',
+        fontName='Helvetica',
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#1E293B")
+    )
+    table_cell_header = ParagraphStyle(
+        'AnalysisTableCellHeader',
+        fontName='Helvetica-Bold',
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#FFFFFF")
+    )
+
+    story = []
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Normalize analysis data
+    if "anomalies" in analysis_data:
+        anomalies = analysis_data.get("anomalies") or []
+        filename = analysis_data.get("filename") or "analyzed_access.log"
+        total_parsed = analysis_data.get("total_parsed") or len(anomalies)
+        anomalies_count = analysis_data.get("anomalies_count") or len(anomalies)
+    else:
+        anomalies = [analysis_data]
+        filename = analysis_data.get("filename") or f"Incident_{analysis_data.get('incident_id', 'REPORT')}.log"
+        total_parsed = 1
+        anomalies_count = 1
+
+    is_local_fallback = bool(analysis_data.get("is_local_fallback", False))
+    ai_triage_used = any(bool(a.get("gemini_triage")) for a in anomalies) and not is_local_fallback
+
+    # Severity computation
+    sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    for a in anomalies:
+        sev = (a.get("severity") or "MEDIUM").upper()
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+
+    overall_sev = "LOW"
+    if sev_counts["CRITICAL"] > 0:
+        overall_sev = "CRITICAL"
+    elif sev_counts["HIGH"] > 0:
+        overall_sev = "HIGH"
+    elif sev_counts["MEDIUM"] > 0:
+        overall_sev = "MEDIUM"
+    elif sev_counts["LOW"] > 0:
+        overall_sev = "LOW"
+
+    overall_sev_color = get_severity_color(overall_sev)
+
+    # 1. Header Banner
+    story.append(Paragraph("LOG SENTINEL | AI SECURITY OPERATIONS CENTER", subtitle_style))
+    story.append(Spacer(1, 2))
+    story.append(Paragraph("Automated Threat Analysis & Incident Report", title_style))
+    story.append(Spacer(1, 4))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#0F172A"), spaceBefore=2, spaceAfter=8))
+
+    # 2. Analysis Metadata Table
+    ai_status_str = "Enabled (Gemini AI Contextual Triage)" if ai_triage_used else "Deterministic Security Engine / Heuristic"
+    processing_str = "Client-Side Fallback (Offline Mode)" if is_local_fallback else "Server-Side Analysis Engine"
+
+    meta_table_data = [
+        [
+            Paragraph("<b>Uploaded Filename:</b>", table_cell_style),
+            Paragraph(f"<code>{sanitize_pdf_text(filename)}</code>", table_cell_style),
+            Paragraph("<b>Analysis Date & Time:</b>", table_cell_style),
+            Paragraph(now_str, table_cell_style),
+        ],
+        [
+            Paragraph("<b>Records Analysed:</b>", table_cell_style),
+            Paragraph(f"<b>{total_parsed}</b>", table_cell_style),
+            Paragraph("<b>Suspicious Findings:</b>", table_cell_style),
+            Paragraph(f"<b><font color='{overall_sev_color.hexval()}'>{anomalies_count}</font></b>", table_cell_style),
+        ],
+        [
+            Paragraph("<b>Overall Threat Severity:</b>", table_cell_style),
+            Paragraph(f"<b><font color='{overall_sev_color.hexval()}'>{overall_sev}</font></b>", table_cell_style),
+            Paragraph("<b>AI Triage Utilized:</b>", table_cell_style),
+            Paragraph(ai_status_str, table_cell_style),
+        ],
+        [
+            Paragraph("<b>Processing Pipeline:</b>", table_cell_style),
+            Paragraph(processing_str, table_cell_style),
+            Paragraph("<b>Detection Breakdown:</b>", table_cell_style),
+            Paragraph(f"{sev_counts['CRITICAL']} Critical, {sev_counts['HIGH']} High, {sev_counts['MEDIUM']} Medium", table_cell_style),
+        ]
+    ]
+
+    t_meta = Table(meta_table_data, colWidths=[120, 160, 120, 140])
+    t_meta.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ('PADDING', (0, 0), (-1, -1), 4.5),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    story.append(t_meta)
+    story.append(Spacer(1, 10))
+
+    # 3. Detected Attack Names & Plain-English Definitions
+    story.append(Paragraph("1. Detected Attack Categories & Plain-English Definitions", section_heading))
+    story.append(Paragraph(
+        "The detection engine identified the following threat classifications. "
+        "Each definition explains what the activity represents in plain language.", body_style
+    ))
+    story.append(Spacer(1, 4))
+
+    # Gather unique attack types
+    unique_threats = {}
+    for a in anomalies:
+        raw_threat = a.get("threat_type") or "SUSPICIOUS_ACTIVITY"
+        if raw_threat not in unique_threats:
+            unique_threats[raw_threat] = {
+                "count": 0,
+                "def": get_attack_definition(raw_threat, a.get("rule_matched")),
+                "sample_rules": set()
+            }
+        unique_threats[raw_threat]["count"] += 1
+        rules = a.get("rule_matched")
+        if isinstance(rules, list):
+            for r in rules[:2]:
+                unique_threats[raw_threat]["sample_rules"].add(str(r))
+
+    if not unique_threats:
+        story.append(Paragraph("<i>No suspicious threat patterns detected. Telemetry normal.</i>", body_style))
+    else:
+        attack_rows = [
+            [
+                Paragraph("Attack Category", table_cell_header),
+                Paragraph("Occurrences", table_cell_header),
+                Paragraph("What It Means (Plain-English Definition)", table_cell_header)
+            ]
+        ]
+        for t_key, t_info in unique_threats.items():
+            adef = t_info["def"]
+            count = t_info["count"]
+            display_name = adef.get("display_name", t_key)
+            definition_text = adef.get("short_definition", "Activity requiring manual security review.")
+            attack_rows.append([
+                Paragraph(f"<b>{sanitize_pdf_text(display_name)}</b>", table_cell_style),
+                Paragraph(str(count), table_cell_style),
+                Paragraph(sanitize_pdf_text(definition_text), table_cell_style)
+            ])
+
+        t_attacks = Table(attack_rows, colWidths=[140, 65, 335])
+        t_attacks.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E293B")),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor("#FFFFFF"), colors.HexColor("#F8FAFC")]),
+            ('PADDING', (0, 0), (-1, -1), 4.5),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        story.append(t_attacks)
+
+    story.append(Spacer(1, 10))
+
+    # 4. Telemetry Evidence & Important Findings
+    story.append(Paragraph("2. Detection Reasons & Supporting Evidence", section_heading))
+    story.append(Paragraph(
+        "Important telemetry records flagged by rule heuristics, entropy analysis, or machine learning baselines:", body_style
+    ))
+    story.append(Spacer(1, 4))
+
+    evidence_rows = [
+        [
+            Paragraph("Timestamp", table_cell_header),
+            Paragraph("Method", table_cell_header),
+            Paragraph("Source IP", table_cell_header),
+            Paragraph("Endpoint", table_cell_header),
+            Paragraph("Status", table_cell_header),
+            Paragraph("Detection Reasons / Rules Matched", table_cell_header)
+        ]
+    ]
+
+    for a in anomalies[:20]:  # Up to 20 representative findings
+        ts = sanitize_pdf_text(a.get("timestamp") or "N/A").replace("T", " ")[:19]
+        m = sanitize_pdf_text(a.get("method") or "GET")
+        ip = sanitize_pdf_text(a.get("ip") or "127.0.0.1")
+        ep = sanitize_pdf_text(a.get("endpoint") or "/")[:28]
+        st = sanitize_pdf_text(str(a.get("status_code") or 200))
+        rules = a.get("rule_matched") or ["Anomaly threshold exceeded"]
+        if isinstance(rules, list):
+            rules_str = "; ".join(rules[:2])
+        else:
+            rules_str = str(rules)
+        rules_clean = sanitize_pdf_text(rules_str)[:55]
+
+        evidence_rows.append([
+            Paragraph(ts, table_cell_style),
+            Paragraph(m, table_cell_style),
+            Paragraph(ip, table_cell_style),
+            Paragraph(f"<code>{ep}</code>", table_cell_style),
+            Paragraph(st, table_cell_style),
+            Paragraph(rules_clean, table_cell_style)
+        ])
+
+    t_evidence = Table(evidence_rows, colWidths=[80, 40, 75, 110, 40, 195])
+    t_evidence.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E293B")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor("#FFFFFF"), colors.HexColor("#F8FAFC")]),
+        ('PADDING', (0, 0), (-1, -1), 3.5),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+    ]))
+    story.append(t_evidence)
+    story.append(Spacer(1, 10))
+
+    # 5. Recommended Investigation & Remediation Steps
+    story.append(Paragraph("3. Recommended Investigation & Remediation Steps", section_heading))
+    remediation_text = (
+        "<b>Immediate Containment:</b><br/>"
+        "â€¢ Identify offending attacker IPs from the evidence table and block them at the reverse proxy or perimeter firewall.<br/>"
+        "â€¢ If brute-force or credential stuffing was detected, temporarily lock impacted accounts and enforce password resets.<br/><br/>"
+        "<b>Application Patching:</b><br/>"
+        "â€¢ For SQL Injection alerts, ensure parameterized queries or ORM abstractions are enforced on target routes.<br/>"
+        "â€¢ For Cross-Site Scripting (XSS), implement strict Context-Aware HTML output encoding and Content-Security-Policy (CSP).<br/>"
+        "â€¢ For Honeytoken / Traversal access, restrict file system permissions and disable public directory browsing.<br/><br/>"
+        "<b>Verification & Monitoring:</b><br/>"
+        "â€¢ Confirm zero recurring anomalies on the Log Sentinel live WebSocket stream.<br/>"
+        "â€¢ Export this incident report for developer audit and post-incident review."
+    )
+    story.append(Paragraph(remediation_text, body_style))
+    story.append(Spacer(1, 6))
+
+    doc.build(story, canvasmaker=NumberedCanvas)
+    buffer.seek(0)
+    return buffer.getvalue()
