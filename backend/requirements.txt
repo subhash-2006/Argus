@@ -9,4 +9,3 @@ pydantic
 python-dotenv
 reportlab
 python-multipart
-requests

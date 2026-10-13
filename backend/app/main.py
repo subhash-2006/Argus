@@ -3,12 +3,11 @@ from datetime import datetime, timezone
 import os
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import sys
-from typing import List, Optional
-import uuid
+from typing import List
 
 # Ensure parent directory is in sys.path so app.engine / app.gemini_triage work reliably
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,14 +18,12 @@ try:
     from app.engine import LogEntry, analyze_log_entry
     from app.gemini_triage import triage_incident_with_gemini
     from app.log_parser import parse_uploaded_file
-    from app.pdf_generator import generate_incident_pdf, generate_summary_pdf, generate_analysis_report_pdf
-    from app.whatsapp_service import whatsapp_service
+    from app.pdf_generator import generate_incident_pdf, generate_summary_pdf
 except (ImportError, ModuleNotFoundError):
     from .engine import LogEntry, analyze_log_entry
     from .gemini_triage import triage_incident_with_gemini
     from .log_parser import parse_uploaded_file
-    from .pdf_generator import generate_incident_pdf, generate_summary_pdf, generate_analysis_report_pdf
-    from .whatsapp_service import whatsapp_service
+    from .pdf_generator import generate_incident_pdf, generate_summary_pdf
 
 
 load_dotenv()
@@ -359,34 +356,6 @@ async def analyze_log_file(file: UploadFile = File(...)):
         duration_total = round(time.time() - start_ts, 3)
         print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Analysis successfully completed in {duration_total}s for '{file.filename}'. Entries parsed: {len(entries)}, Anomalies found: {len(anomalies)}")
 
-        # Automated WhatsApp Threat Alert System integration
-        whatsapp_result = None
-        if anomalies:
-            try:
-                analysis_run_id = f"ANALYSIS-{uuid.uuid4().hex[:8].upper()}"
-                whatsapp_result = whatsapp_service.notify_threat_analysis(
-                    analysis_data={
-                        "analysis_id": analysis_run_id,
-                        "filename": file.filename,
-                        "total_parsed": len(entries),
-                        "valid_entries": valid_count,
-                        "invalid_entries": invalid_count,
-                        "anomalies_count": len(anomalies),
-                        "anomalies": anomalies,
-                        "severity_summary": severity_counts,
-                        "threat_categories": list(threat_categories),
-                        "is_local_fallback": False
-                    },
-                    idempotency_key=analysis_run_id
-                )
-            except Exception as w_err:
-                print(f"WhatsApp notification trigger error: {w_err}")
-                whatsapp_result = {
-                    "sent": False,
-                    "status": "failed",
-                    "error": str(w_err)
-                }
-
         return {
             "success": True,
             "filename": file.filename,
@@ -397,7 +366,6 @@ async def analyze_log_file(file: UploadFile = File(...)):
             "anomalies": anomalies,
             "severity_summary": severity_counts,
             "threat_categories": list(threat_categories),
-            "whatsapp_alert": whatsapp_result,
             "message": f"Successfully parsed {len(entries)} log entries. Detected {len(anomalies)} security anomalies."
         }
     except HTTPException:
@@ -410,130 +378,6 @@ async def analyze_log_file(file: UploadFile = File(...)):
         sanitized_msg = sanitized_msg.replace(GEMINI_API_KEY, "[REDACTED_KEY]") if GEMINI_API_KEY else sanitized_msg
         print(f"[{datetime.now(timezone.utc).isoformat()}] [ANALYZE-FILE] Failed after {duration_err}s with {err_type}: {sanitized_msg}")
         raise HTTPException(status_code=500, detail=f"File analysis failed due to internal server error ({err_type})")
-
-
-# ==========================================
-# WhatsApp Threat Alert System API Endpoints
-# ==========================================
-
-@app.get("/api/whatsapp/status")
-async def get_whatsapp_status():
-    """Returns safe WhatsApp Cloud API integration status and latest notification details."""
-    return whatsapp_service.get_status_safe()
-
-
-@app.post("/api/whatsapp/config")
-async def update_whatsapp_config(payload: dict):
-    """Updates runtime WhatsApp recipient number or enabled state."""
-    enabled = payload.get("enabled")
-    recipient = payload.get("recipient")
-    try:
-        updated = whatsapp_service.update_runtime_config(enabled=enabled, recipient=recipient)
-        return {"success": True, "config": updated}
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update config: {str(e)}")
-
-
-@app.post("/api/whatsapp/preview")
-async def get_whatsapp_preview(payload: dict):
-    """Generates preview text, attack definition, and summary without sending a message."""
-    try:
-        recipient = payload.get("recipient")
-        analysis_data = payload.get("analysis") or payload
-        preview = whatsapp_service.generate_alert_preview(analysis_data, recipient=recipient)
-        return {"success": True, "preview": preview}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate preview: {str(e)}")
-
-
-@app.post("/api/whatsapp/test")
-async def send_whatsapp_test(payload: Optional[dict] = None):
-    """Sends a test WhatsApp message or generates demo preview with PDF attachment."""
-    recipient = (payload or {}).get("recipient")
-    try:
-        result = whatsapp_service.send_test_message(recipient=recipient)
-        return {"success": True, "result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send test WhatsApp message: {str(e)}")
-
-
-@app.post("/api/whatsapp/retry")
-async def retry_whatsapp_notification():
-    """Retries sending the latest eligible failed WhatsApp notification."""
-    try:
-        res = whatsapp_service.retry_latest_notification()
-        return res
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Retry failed: {str(e)}")
-
-
-@app.post("/api/whatsapp/notify-analysis")
-async def notify_analysis_manual(payload: dict):
-    """
-    Explicit endpoint to trigger WhatsApp alert for an analysis dataset.
-    Supports both backend datasets and client-side fallback datasets.
-    """
-    try:
-        recipient = payload.get("recipient")
-        analysis_data = payload.get("analysis") or payload
-        result = whatsapp_service.notify_threat_analysis(analysis_data, recipient=recipient)
-        return {"success": True, "result": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to notify analysis: {str(e)}")
-
-
-@app.get("/api/whatsapp/download-pdf")
-async def download_whatsapp_pdf(id: Optional[str] = "latest"):
-    """Downloads the attached threat report PDF from memory cache for preview/inspection."""
-    pdf_bytes = whatsapp_service.get_cached_pdf(id)
-    if not pdf_bytes:
-        sample_doc = {
-            "incident_id": "PREVIEW-REPORT",
-            "threat_type": "SECURITY_ANOMALY",
-            "severity": "HIGH",
-            "ip": "127.0.0.1",
-            "endpoint": "/api/v1/auth",
-            "method": "POST",
-            "status_code": 401,
-            "rule_matched": ["Anomaly threshold reached"]
-        }
-        pdf_bytes = generate_analysis_report_pdf(sample_doc)
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=LogSentinel_Threat_Report.pdf"}
-    )
-
-
-@app.get("/api/whatsapp/webhook")
-async def whatsapp_webhook_verification(request: Request):
-    """
-    Official Meta WhatsApp Webhook verification handshake.
-    Validates hub.verify_token and returns hub.challenge.
-    """
-    params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-
-    expected_token = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "logsentinel_verify_token")
-    if mode == "subscribe" and token == expected_token:
-        return Response(content=challenge, media_type="text/plain")
-    raise HTTPException(status_code=403, detail="Verification token mismatch")
-
-
-@app.post("/api/whatsapp/webhook")
-async def whatsapp_webhook_callback(request: Request):
-    """Processes Meta WhatsApp message status delivery callbacks."""
-    try:
-        body = await request.json()
-        whatsapp_service.handle_webhook_status_update(body)
-        return {"status": "ok"}
-    except Exception as err:
-        return {"status": "error", "detail": str(err)}
-
 
 
 
